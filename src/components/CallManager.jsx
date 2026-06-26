@@ -1194,7 +1194,7 @@ export default function CallManager({ user, debug }) {
           break;
 
         case "disconnected":
-          if (isInitialIcePhase()) break;
+          if (isInitialIcePhase()) return;
           transitionRTCState("RECONNECTING", { iceState: state });
           logWebRTC("ICE_DISCONNECTED", { graceMs: DISCONNECT_GRACE_MS });
           setIsReconnecting(true);
@@ -1253,7 +1253,7 @@ export default function CallManager({ user, debug }) {
       }
       if (state === "failed") {
         logWebRTC("DTLS_FAILED", { elapsedMs, initialPhase: isInitialIcePhase() });
-        if (isInitialIcePhase()) break;
+        if (isInitialIcePhase()) return;
         transitionRTCState("RECONNECTING", { connectionState: state });
         setCallErrorMessage("Connection failed. Recovering...");
         restartIceClean();

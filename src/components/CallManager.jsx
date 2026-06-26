@@ -26,13 +26,19 @@ const log = {
   error: (...a) => { console.error(`[WEBRTC][ERROR]`, { timestamp: new Date().toISOString(), detail: a }); },
 };
 
-// Phase 1 — Initial ICE stabilization (India IPv6 P2P: allow 45–60s for first connect)
-const DISCONNECT_GRACE_MS = 12000;         // post-connect: grace before recovery on disconnected
-const INITIAL_DISCONNECT_GRACE_MS = 20000; // initial ICE: monitor disconnected, do not restart early
-const INITIAL_ICE_TIMEOUT_MS = 60000;      // do not interrupt first O/A + ICE until this elapses
-const ICE_RESTART_COOLDOWN = 8000;         // min gap between post-connect restarts
-const MAX_RECOVERY_CYCLES = 2;             // ICE restart attempts before TURN escalation
-const ALLOWED_OFFER_REASONS = new Set(["initial", "ice_restart_recovery"]);
+// Pure P2P mode — STUN only, no TURN, no setConfiguration, single Offer/Answer
+const P2P_ONLY_MODE = true;
+const ICE_CANDIDATE_POOL_SIZE = 10;
+
+// Phase 1 — Initial ICE stabilization (allow slow IPv6/cross-network checks)
+const DISCONNECT_GRACE_MS = 12000;
+const INITIAL_DISCONNECT_GRACE_MS = 20000;
+const INITIAL_ICE_TIMEOUT_MS = 60000;
+const ICE_RESTART_COOLDOWN = 8000;
+const MAX_RECOVERY_CYCLES = 2;
+const ALLOWED_OFFER_REASONS = P2P_ONLY_MODE
+  ? new Set(["initial"])
+  : new Set(["initial", "ice_restart_recovery"]);
 
 const DEFAULT_STUN_SERVERS = [
   { urls: "stun:stun.l.google.com:19302" },
@@ -428,6 +434,15 @@ export default function CallManager({ user, debug }) {
     })
   );
 
+  const filterStunOnlyIceServers = (servers) => (
+    (servers || []).flatMap((server) => {
+      const urls = Array.isArray(server.urls) ? server.urls : [server.urls];
+      const stunUrls = urls.filter((u) => typeof u === "string" && u.startsWith("stun:"));
+      if (!stunUrls.length) return [];
+      return [{ urls: stunUrls.length === 1 ? stunUrls[0] : stunUrls }];
+    })
+  );
+
   const serializeIceCandidate = (candidate) => {
     if (!candidate) return null;
     return {
@@ -460,9 +475,9 @@ export default function CallManager({ user, debug }) {
   };
 
   const buildRtcConfiguration = (iceServers) => ({
-    iceServers: dedupeIceServers(iceServers),
+    iceServers: dedupeIceServers(filterStunOnlyIceServers(iceServers)),
     iceTransportPolicy: "all",
-    iceCandidatePoolSize: 2,
+    iceCandidatePoolSize: ICE_CANDIDATE_POOL_SIZE,
     bundlePolicy: "max-bundle",
     rtcpMuxPolicy: "require",
   });
@@ -494,6 +509,10 @@ export default function CallManager({ user, debug }) {
   };
 
   const tryRestartIceWithoutSdp = (reason) => {
+    if (P2P_ONLY_MODE) {
+      logWebRTC("ICE_RESTART_WITHOUT_SDP_BLOCKED", { reason, mode: "p2p_only" });
+      return false;
+    }
     auditAction("restartIce()", reason);
     if (!canInterruptInitialIce()) {
       logWebRTC("ICE_RESTART_WITHOUT_SDP_BLOCKED", { reason, phase: "initial" });
@@ -517,6 +536,10 @@ export default function CallManager({ user, debug }) {
   };
 
   const sendIceRestartOffer = async (reason) => {
+    if (P2P_ONLY_MODE) {
+      logWebRTC("SDP_OFFER_BLOCKED", { reason, mode: "p2p_only" });
+      return false;
+    }
     auditAction("createOffer(iceRestart)", reason);
     if (!canInterruptInitialIce()) {
       logWebRTC("SDP_OFFER_BLOCKED", { reason, detail: "initial_ice_phase" });
@@ -565,6 +588,10 @@ export default function CallManager({ user, debug }) {
   };
 
   const escalateToTurn = async () => {
+    if (P2P_ONLY_MODE) {
+      log.turn("TURN disabled — P2P_ONLY_MODE is active.");
+      return;
+    }
     auditAction("setConfiguration(TURN)", "turn_escalation");
     if (!canInterruptInitialIce()) {
       log.turn("TURN escalation deferred — initial ICE phase still running.");
@@ -599,7 +626,18 @@ export default function CallManager({ user, debug }) {
       iceState: ice,
       connectionState: pc.connectionState,
       elapsedMs: Date.now() - connectionStartTimeRef.current,
+      mode: P2P_ONLY_MODE ? "p2p_only" : "full",
     });
+
+    if (P2P_ONLY_MODE) {
+      logWebRTC("P2P_ONLY_TIMEOUT", {
+        callId: callIdRef.current,
+        counters: { ...callTimelineRef.current.counters },
+        hint: "Test on same Wi-Fi first. TURN will be added in a later phase.",
+      });
+      setCallErrorMessage("P2P connection timed out. Try the same Wi-Fi network on both devices.");
+      return;
+    }
 
     if (!turnEscalatedRef.current) await escalateToTurn();
     if (tryRestartIceWithoutSdp("initial_timeout")) return;
@@ -1327,6 +1365,10 @@ export default function CallManager({ user, debug }) {
   // Safe ICE restart (ONLY fallback mechanism)
   // ───────────────────────────────────────────────────────────────────────────
   const restartIceClean = async () => {
+    if (P2P_ONLY_MODE) {
+      log.restart("ICE restart disabled in P2P_ONLY_MODE.");
+      return;
+    }
     const pc = pcRef.current;
     if (!pc) return;
 
@@ -1576,6 +1618,9 @@ export default function CallManager({ user, debug }) {
 
       if (state === "connected") {
         logWebRTC("DTLS_CONNECTED", { elapsedMs });
+        if (P2P_ONLY_MODE) {
+          logWebRTC("P2P_CONNECTION_SUCCESSFUL", { callId: callIdRef.current, elapsedMs });
+        }
         setIsReconnecting(false);
         recoveryAttemptsRef.current = 0;
         // Immediately capture DTLS stats once connected
@@ -1816,10 +1861,6 @@ export default function CallManager({ user, debug }) {
           if (appliedRemoteSdpKeysRef.current.has(sdpKey)) {
             logWebRTC("SDP_OFFER_IGNORED", { reason: "duplicate_remote_offer" });
             return;
-          }
-
-          if (iceRestartOffer && !turnEscalatedRef.current) {
-            await escalateToTurn();
           }
 
           if (iceRestartOffer && pc.signalingState === "stable") {
@@ -2367,7 +2408,8 @@ export default function CallManager({ user, debug }) {
       try {
         const res = await callAPI.getIceServers(false, true);
         if (res?.iceServers?.length) {
-          stunServers = [...DEFAULT_STUN_SERVERS, ...mapIceServersFromApi(res.iceServers)];
+          const apiStun = filterStunOnlyIceServers(mapIceServersFromApi(res.iceServers));
+          stunServers = [...DEFAULT_STUN_SERVERS, ...apiStun];
         }
       } catch (err) {
         log.error("Failed to fetch STUN-only ICE servers, using defaults:", err);
@@ -2376,11 +2418,7 @@ export default function CallManager({ user, debug }) {
       if (isStale()) return;
 
       const configuration = buildRtcConfiguration(stunServers);
-      log.ice("Initialising RTCPeerConnection (STUN-only, pool=2, 60s initial ICE patience)");
-
-      pcInstanceIdRef.current += 1;
-      timelineBump("pcCreated");
-      timelineLog("PC_CREATED", { generation, iceCandidatePoolSize: configuration.iceCandidatePoolSize });
+      log.ice(`P2P-only RTCPeerConnection (STUN, pool=${ICE_CANDIDATE_POOL_SIZE}, no TURN)`);
       installTimelineGlobals();
 
       const pc = new RTCPeerConnection(configuration);
@@ -2388,6 +2426,15 @@ export default function CallManager({ user, debug }) {
         pc.close();
         return;
       }
+
+      pcInstanceIdRef.current += 1;
+      timelineBump("pcCreated");
+      timelineLog("PC_CREATED", {
+        generation,
+        mode: "p2p_only",
+        stunServerCount: configuration.iceServers.length,
+        iceCandidatePoolSize: configuration.iceCandidatePoolSize,
+      });
 
       pcRef.current = pc;
       window.pc = pc;

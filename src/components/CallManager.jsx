@@ -41,6 +41,33 @@ const DEFAULT_STUN_SERVERS = [
   { urls: "stun:stun.cloudflare.com:3478" },
 ];
 
+// Canonical per-call lifecycle steps (logged in order with seq + callId)
+const CALL_LIFECYCLE = {
+  PC_CREATED: "PeerConnection Created",
+  CREATE_OFFER: "createOffer()",
+  SET_LOCAL_DESCRIPTION_OFFER: "setLocalDescription() [offer]",
+  OFFER_SENT: "Offer Sent",
+  OFFER_RECEIVED: "Offer Received",
+  SET_REMOTE_DESCRIPTION_OFFER: "setRemoteDescription() [offer]",
+  CREATE_ANSWER: "createAnswer()",
+  SET_LOCAL_DESCRIPTION_ANSWER: "setLocalDescription() [answer]",
+  ANSWER_SENT: "Answer Sent",
+  ANSWER_RECEIVED: "Answer Received",
+  SET_REMOTE_DESCRIPTION_ANSWER: "setRemoteDescription() [answer]",
+  ICE_GATHERING_STARTED: "ICE Gathering Started",
+  LOCAL_CANDIDATE_GENERATED: "Local Candidate Generated",
+  LOCAL_CANDIDATE_SENT: "Local Candidate Sent",
+  REMOTE_CANDIDATE_RECEIVED: "Remote Candidate Received",
+  ADD_ICE_CANDIDATE: "addIceCandidate()",
+  ICE_STATE_CHANGED: "ICE State Changed",
+  CONNECTION_STATE_CHANGED: "Connection State Changed",
+  SELECTED_CANDIDATE_PAIR: "Selected Candidate Pair",
+  SIGNALING_STATE_CHANGED: "Signaling State Changed",
+  OFFER_IGNORED: "Offer Ignored",
+  REMOTE_CANDIDATE_END: "Remote Candidate End",
+  AUDIT: "Audit",
+};
+
 export default function CallManager({ user, debug }) {
   const [callState, setCallState] = useState("idle"); // idle, ringing, incoming, active
   const [callType, setCallType] = useState("voice");
@@ -54,6 +81,7 @@ export default function CallManager({ user, debug }) {
   useEffect(() => { callStateRef.current = callState; }, [callState]);
   useEffect(() => { callIdRef.current = callId; }, [callId]);
   useEffect(() => { callTypeRef.current = callType; }, [callType]);
+  useEffect(() => { installTimelineGlobals(); }, []);
 
   // Active call UI state
   const [duration, setDuration] = useState(0);
@@ -166,13 +194,16 @@ export default function CallManager({ user, debug }) {
   const handleSocketMessageRef = useRef(null);
   const cleanupCallRef = useRef(null);
 
-  // Per-call lifecycle timeline (debug with window.dumpCallTimeline())
+  // Per-call lifecycle timeline — window.dumpCallTimeline() / window.getCallTimeline(callId)
   const pcInstanceIdRef = useRef(0);
+  const timelineSeqRef = useRef(0);
   const lastSignalingStateRef = useRef("new");
   const lastIceStateRef = useRef("new");
   const lastConnectionStateRef = useRef("new");
   const callTimelineRef = useRef({
     callId: null,
+    startedAt: null,
+    role: null,
     events: [],
     counters: {
       pcCreated: 0,
@@ -205,18 +236,78 @@ export default function CallManager({ user, debug }) {
     elapsedMs: callStartTimeRef.current ? Date.now() - callStartTimeRef.current : 0,
   });
 
+  const persistTimelineGlobally = () => {
+    if (typeof window === "undefined" || !callTimelineRef.current.callId) return;
+    if (!window.__callTimelines) window.__callTimelines = {};
+    window.__callTimelines[callTimelineRef.current.callId] = {
+      callId: callTimelineRef.current.callId,
+      role: callTimelineRef.current.role,
+      startedAt: callTimelineRef.current.startedAt,
+      counters: { ...callTimelineRef.current.counters },
+      events: [...callTimelineRef.current.events],
+    };
+  };
+
+  const formatTimelineDump = (timeline) => {
+    const lines = timeline.events.map((e) => {
+      const ts = e.elapsedMs != null ? `+${e.elapsedMs}ms` : "";
+      const states = `[ice:${e.iceState} sig:${e.signalingState} conn:${e.connectionState}]`;
+      const extra = e.from != null && e.to != null ? ` ${e.from} → ${e.to}` : "";
+      const detail = e.type ? ` (${e.type}/${e.family || "?"})` : "";
+      return `${String(e.seq).padStart(3, " ")}. ${ts.padStart(8)} ${e.step}${extra}${detail} ${states}`;
+    });
+    return [
+      `── Call Timeline: ${timeline.callId} (${timeline.role}) ──`,
+      ...lines,
+      "── Counters ──",
+      JSON.stringify(timeline.counters, null, 2),
+    ].join("\n");
+  };
+
+  const buildTimelineDump = (callId = callIdRef.current) => {
+    const stored = typeof window !== "undefined" && window.__callTimelines?.[callId];
+    const timeline = stored || {
+      callId: callTimelineRef.current.callId,
+      role: callTimelineRef.current.role,
+      startedAt: callTimelineRef.current.startedAt,
+      counters: { ...callTimelineRef.current.counters },
+      events: [...callTimelineRef.current.events],
+    };
+    const mismatch = {
+      localGeneratedVsSent:
+        timeline.counters.localCandidatesGenerated - timeline.counters.localCandidatesSent,
+      remoteReceivedVsApplied:
+        timeline.counters.remoteCandidatesReceived - timeline.counters.remoteCandidatesApplied,
+      extraOffersAfterFirst:
+        Math.max(0, timeline.counters.offersReceived - 1),
+      multiplePCs: timeline.counters.pcCreated > 1,
+    };
+    return { ...timeline, mismatch, formatted: formatTimelineDump(timeline) };
+  };
+
   const timelineBump = (counter, extra = {}) => {
     const c = callTimelineRef.current.counters;
     c[counter] = (c[counter] || 0) + 1;
+    persistTimelineGlobally();
     logWebRTC("TIMELINE_COUNTER", { counter, count: c[counter], ...getTimelineContext(), ...extra });
   };
 
-  const timelineLog = (event, extra = {}) => {
-    const entry = { event, ...getTimelineContext(), ...extra };
+  const timelineLog = (stepKey, extra = {}) => {
+    timelineSeqRef.current += 1;
+    const step = CALL_LIFECYCLE[stepKey] || stepKey;
+    const entry = {
+      seq: timelineSeqRef.current,
+      step: step,
+      stepKey,
+      ...getTimelineContext(),
+      ...extra,
+    };
     callTimelineRef.current.events.push({ t: Date.now(), ...entry });
-    logWebRTC("TIMELINE", entry);
-    if (event === "PC_CREATED" && callTimelineRef.current.counters.pcCreated > 1) {
-      log.warn("Multiple PeerConnections created for same call — extra offers likely.", {
+    persistTimelineGlobally();
+    logWebRTC("CALL_TIMELINE", entry);
+
+    if (stepKey === "PC_CREATED" && callTimelineRef.current.counters.pcCreated > 1) {
+      log.warn("Multiple PeerConnections for same callId — expect extra Offers.", {
         pcCreated: callTimelineRef.current.counters.pcCreated,
         callId: callIdRef.current,
       });
@@ -227,17 +318,19 @@ export default function CallManager({ user, debug }) {
     logWebRTC("AUDIT", {
       action,
       reason,
-      caller: action,
       why: reason,
       ...getTimelineContext(),
       ...extra,
     });
-    timelineLog(action, { reason, ...extra });
+    timelineLog("AUDIT", { action, reason, ...extra });
   };
 
   const resetCallTimeline = (callId) => {
+    timelineSeqRef.current = 0;
     callTimelineRef.current = {
       callId,
+      startedAt: Date.now(),
+      role: isInitiatorRef.current ? "caller" : "callee",
       events: [],
       counters: {
         pcCreated: 0,
@@ -261,7 +354,25 @@ export default function CallManager({ user, debug }) {
     lastSignalingStateRef.current = "new";
     lastIceStateRef.current = "new";
     lastConnectionStateRef.current = "new";
-    timelineLog("TIMELINE_RESET", { callId });
+    persistTimelineGlobally();
+  };
+
+  const installTimelineGlobals = () => {
+    if (typeof window === "undefined") return;
+    window.__callTimelines = window.__callTimelines || {};
+    window.dumpCallTimeline = (callId) => {
+      const dump = buildTimelineDump(callId);
+      console.log(dump.formatted);
+      console.table(dump.counters);
+      if (dump.mismatch.multiplePCs || dump.mismatch.extraOffersAfterFirst > 0) {
+        console.warn("[WEBRTC] Timeline health issues:", dump.mismatch);
+      }
+      return dump;
+    };
+    window.getCallTimeline = (callId) => (
+      window.__callTimelines?.[callId] || buildTimelineDump(callId)
+    );
+    window.listCallTimelines = () => Object.keys(window.__callTimelines || {});
   };
 
   // ───────────────────────────────────────────────────────────────────────────
@@ -418,13 +529,14 @@ export default function CallManager({ user, debug }) {
 
     iceRestartInFlightRef.current = true;
     try {
-      timelineLog("createOffer(iceRestart)");
+      timelineLog("CREATE_OFFER", { iceRestart: true, reason });
       const offer = await pc.createOffer({ iceRestart: true });
       timelineBump("offersCreated", { reason, iceRestart: true });
-      timelineLog("setLocalDescription(iceRestart-offer)");
+      timelineLog("SET_LOCAL_DESCRIPTION_OFFER", { iceRestart: true, reason });
       await pc.setLocalDescription(offer);
       sendSignaling({ action: "offer", sdp: offer.sdp });
       timelineBump("offersSent", { reason, iceRestart: true });
+      timelineLog("OFFER_SENT", { reason, iceRestart: true });
       logWebRTC("SDP_OFFER_SENT", { reason, iceRestart: true });
       return true;
     } catch (err) {
@@ -831,17 +943,18 @@ export default function CallManager({ user, debug }) {
           setupDataChannel(pc, isInitiatorRef.current);
           initialNegotiationStartedRef.current = true;
         }
-        timelineLog("createOffer()");
+        timelineLog("CREATE_OFFER", { reason });
         const offer = await pc.createOffer(options);
         timelineBump("offersCreated", { reason });
         logWebRTC("SDP_OFFER_CREATED", { sdpType: "offer", reason, offerCreatedAt: Date.now() });
-        timelineLog("setLocalDescription(offer)");
+        timelineLog("SET_LOCAL_DESCRIPTION_OFFER", { reason });
         await pc.setLocalDescription(offer);
         logWebRTC("SDP_LOCAL_DESC_SET", { sdpType: "offer", reason });
         offerCreatedTimeRef.current = Date.now();
         transitionRTCState("WAITING_ANSWER", { reason });
         sendSignaling({ action: "offer", sdp: offer.sdp });
         timelineBump("offersSent", { reason });
+        timelineLog("OFFER_SENT", { reason });
         logWebRTC("SDP_OFFER_SENT", { reason });
         return true;
       } finally {
@@ -1273,7 +1386,7 @@ export default function CallManager({ user, debug }) {
       const next = pc.signalingState;
       lastSignalingStateRef.current = next;
       trace("SDP", "signaling state changed", { signalingState: next });
-      timelineLog("SIGNALING_STATE_CHANGED", { from: prev, to: next });
+      timelineLog("SIGNALING_STATE_CHANGED", { from: prev, to: next, state: next });
       logWebRTC("SIGNALING_STATE", { state: next, from: prev });
       if (pc.signalingState === "stable") {
         transitionRTCState("STABLE");
@@ -1505,7 +1618,7 @@ export default function CallManager({ user, debug }) {
           families: { ...localCandidateFamiliesRef.current },
         });
         timelineBump("localCandidatesSent");
-        timelineLog("LOCAL_CANDIDATE_SENT");
+        timelineLog("LOCAL_CANDIDATE_SENT", { type, family });
         sendSignaling({ action: "ice_candidate", candidate: serialized });
       } else {
         logWebRTC("ICE_GATHERING_NULL_CANDIDATE", {
@@ -1514,7 +1627,7 @@ export default function CallManager({ user, debug }) {
           families: { ...localCandidateFamiliesRef.current },
         });
         iceGatheringEndTimeRef.current = iceGatheringEndTimeRef.current || Date.now();
-        timelineLog("ICE_GATHERING_COMPLETE_SIGNAL");
+        timelineLog("REMOTE_CANDIDATE_END", { direction: "local_gathering_complete" });
         sendSignaling({ action: "ice_candidate", candidate: null });
       }
     };
@@ -1669,13 +1782,14 @@ export default function CallManager({ user, debug }) {
         await runPeerOperation("handleRemoteOffer", async () => {
           timelineBump("offersReceived");
           timelineLog("OFFER_RECEIVED");
-          logWebRTC("SDP_OFFER_RECEIVED", { sdpType: "offer" });
+          logWebRTC("SDP_OFFER_RECEIVED", { sdpType: "offer", callId: callIdRef.current });
           const pc = pcRef.current;
           const iceRestartOffer = isIceRestartSdp(msg.sdp, pc);
 
           if (isInitialIcePhase()) {
             if (initialNegotiationCompleteRef.current) {
               timelineBump("offersIgnored", { reason: "initial_ice_patience_window" });
+              timelineLog("OFFER_IGNORED", { reason: "initial_ice_patience_window", iceRestart: iceRestartOffer });
               logWebRTC("SDP_OFFER_IGNORED", {
                 reason: "initial_ice_patience_window",
                 iceRestart: iceRestartOffer,
@@ -1685,6 +1799,7 @@ export default function CallManager({ user, debug }) {
             }
           } else if (initialNegotiationCompleteRef.current && !iceRestartOffer) {
             timelineBump("offersIgnored", { reason: "initial_negotiation_already_complete" });
+            timelineLog("OFFER_IGNORED", { reason: "initial_negotiation_already_complete" });
             logWebRTC("SDP_OFFER_IGNORED", { reason: "initial_negotiation_already_complete" });
             return;
           }
@@ -1725,7 +1840,7 @@ export default function CallManager({ user, debug }) {
           isNegotiatingRef.current = true;
           remoteDescriptionAppliedRef.current = false;
           transitionRTCState("PREPARING_MEDIA", { remoteSdp: "offer", iceRestart: iceRestartOffer });
-          timelineLog("setRemoteDescription(offer)");
+          timelineLog("SET_REMOTE_DESCRIPTION_OFFER", { iceRestart: iceRestartOffer });
           await pc.setRemoteDescription(
             new RTCSessionDescription({ type: "offer", sdp: msg.sdp })
           );
@@ -1738,15 +1853,16 @@ export default function CallManager({ user, debug }) {
             await syncSendersWithTracks(pc);
           }
 
-          timelineLog("createAnswer()");
+          timelineLog("CREATE_ANSWER", { iceRestart: iceRestartOffer });
           const answer = await pc.createAnswer();
           timelineBump("answersCreated", { iceRestart: iceRestartOffer });
           logWebRTC("SDP_ANSWER_CREATED", { sdpType: "answer", iceRestart: iceRestartOffer });
-          timelineLog("setLocalDescription(answer)");
+          timelineLog("SET_LOCAL_DESCRIPTION_ANSWER", { iceRestart: iceRestartOffer });
           await pc.setLocalDescription(answer);
           logWebRTC("SDP_LOCAL_DESC_SET", { sdpType: "answer" });
           sendSignaling({ action: "answer", sdp: answer.sdp });
           timelineBump("answersSent", { iceRestart: iceRestartOffer });
+          timelineLog("ANSWER_SENT", { iceRestart: iceRestartOffer });
           logWebRTC("SDP_ANSWER_SENT", { iceRestart: iceRestartOffer });
 
           if (!iceRestartOffer) {
@@ -1781,7 +1897,7 @@ export default function CallManager({ user, debug }) {
           isNegotiatingRef.current = true;
           answerReceivedTimeRef.current = Date.now();
           remoteDescriptionAppliedRef.current = false;
-          timelineLog("setRemoteDescription(answer)");
+          timelineLog("SET_REMOTE_DESCRIPTION_ANSWER");
           await pcRef.current.setRemoteDescription(
             new RTCSessionDescription({ type: "answer", sdp: msg.sdp })
           );
@@ -1851,7 +1967,7 @@ export default function CallManager({ user, debug }) {
             pendingIceCandidates.current.push(msg.candidate);
           }
         } else {
-          timelineLog("REMOTE_CANDIDATE_END");
+          timelineLog("REMOTE_CANDIDATE_END", { direction: "remote" });
           logWebRTC("ICE_CANDIDATE_REMOTE_NULL", { meaning: "remote end-of-candidates" });
         }
         break;
@@ -1893,6 +2009,7 @@ export default function CallManager({ user, debug }) {
         }
         setCallId(msg.call_id);
         callIdRef.current = msg.call_id;
+        resetCallTimeline(msg.call_id);
         setCallType(msg.call_type);
         setCallerEmail(msg.caller_email || "Someone");
         setCallState("incoming");
@@ -1901,6 +2018,7 @@ export default function CallManager({ user, debug }) {
         if (msg.call_id) {
           setCallId(msg.call_id);
           callIdRef.current = msg.call_id;
+          if (!callTimelineRef.current.callId) resetCallTimeline(msg.call_id);
         }
         setIsAccepting(false);
         setCallState("active");
@@ -2263,6 +2381,7 @@ export default function CallManager({ user, debug }) {
       pcInstanceIdRef.current += 1;
       timelineBump("pcCreated");
       timelineLog("PC_CREATED", { generation, iceCandidatePoolSize: configuration.iceCandidatePoolSize });
+      installTimelineGlobals();
 
       const pc = new RTCPeerConnection(configuration);
       if (isStale()) {
@@ -2272,24 +2391,6 @@ export default function CallManager({ user, debug }) {
 
       pcRef.current = pc;
       window.pc = pc;
-      window.dumpCallTimeline = () => {
-        const dump = {
-          callId: callIdRef.current,
-          counters: { ...callTimelineRef.current.counters },
-          events: [...callTimelineRef.current.events],
-          mismatch: {
-            localGeneratedVsSent:
-              callTimelineRef.current.counters.localCandidatesGenerated
-              - callTimelineRef.current.counters.localCandidatesSent,
-            remoteReceivedVsApplied:
-              callTimelineRef.current.counters.remoteCandidatesReceived
-              - callTimelineRef.current.counters.remoteCandidatesApplied,
-          },
-        };
-        console.table(callTimelineRef.current.counters);
-        console.log("[WEBRTC][TIMELINE_DUMP]", dump);
-        return dump;
-      };
 
       setupConnectionListeners(pc, isInitiator);
       setupIceCandidateHandler(pc);

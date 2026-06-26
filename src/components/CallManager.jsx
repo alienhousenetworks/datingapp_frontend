@@ -30,6 +30,14 @@ const log = {
 const DISCONNECT_GRACE_MS = 6000;  // wait before ICE restart on "disconnected"
 const ICE_RESTART_COOLDOWN = 8000;  // min gap between restarts
 const MAX_RECOVERY_CYCLES = 2;     // ICE restart attempts before TURN escalation
+const P2P_WATCHDOG_MS = 12000;     // try STUN-only P2P first, then add TURN
+
+const DEFAULT_STUN_SERVERS = [
+  { urls: "stun:stun.l.google.com:19302" },
+  { urls: "stun:stun1.l.google.com:19302" },
+  { urls: "stun:stun2.l.google.com:19302" },
+  { urls: "stun:stun.cloudflare.com:3478" },
+];
 
 export default function CallManager({ user, debug }) {
   const [callState, setCallState] = useState("idle"); // idle, ringing, incoming, active
@@ -52,6 +60,7 @@ export default function CallManager({ user, debug }) {
   const [chatSaved, setChatSaved] = useState(false);
   const [cameraUnlocked, setCameraUnlocked] = useState(false);
   const [isReconnecting, setIsReconnecting] = useState(false);
+  const [isAccepting, setIsAccepting] = useState(false);
   const [isMediaConnected, setIsMediaConnected] = useState(false);
   const [quotaWarning, setQuotaWarning] = useState(null);
   const [isAddingMinutes, setIsAddingMinutes] = useState(false);
@@ -76,6 +85,7 @@ export default function CallManager({ user, debug }) {
   const negotiationQueuedRef = useRef(false);
   const negotiationChainRef = useRef(Promise.resolve());
   const webrtcSetupRunningRef = useRef(false); // guard: prevent double-invoke of setupWebRTCPeer
+  const webrtcSetupGenerationRef = useRef(0); // invalidates stale async setupWebRTCPeer runs
   const webrtcPeerReadyRef = useRef(false);
   const rtcStateRef = useRef("IDLE");
   const initialNegotiationStartedRef = useRef(false);
@@ -158,6 +168,64 @@ export default function CallManager({ user, debug }) {
     return m ? m[1].toLowerCase() : null;
   };
 
+  const dedupeIceServers = (servers) => {
+    const seen = new Set();
+    return servers.filter((server) => {
+      const urls = Array.isArray(server.urls) ? server.urls.join("|") : String(server.urls || "");
+      const key = `${urls}|${server.username || ""}`;
+      if (!urls || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  };
+
+  const mapIceServersFromApi = (iceServers) => (
+    (iceServers || []).map((server) => {
+      const mapped = { urls: server.urls };
+      if (server.username) mapped.username = server.username;
+      if (server.credential) mapped.credential = server.credential;
+      return mapped;
+    })
+  );
+
+  const serializeIceCandidate = (candidate) => {
+    if (!candidate) return null;
+    return {
+      candidate: candidate.candidate,
+      sdpMid: candidate.sdpMid,
+      sdpMLineIndex: candidate.sdpMLineIndex,
+      usernameFragment: candidate.usernameFragment,
+    };
+  };
+
+  const closePeerConnection = () => {
+    const pc = pcRef.current;
+    if (pc) {
+      pc.oniceconnectionstatechange = null;
+      pc.onconnectionstatechange = null;
+      pc.onicegatheringstatechange = null;
+      pc.onicecandidate = null;
+      pc.ontrack = null;
+      pc.onsignalingstatechange = null;
+      pc.onnegotiationneeded = null;
+      pc.ondatachannel = null;
+      try { pc.close(); } catch { /* already closed */ }
+      pcRef.current = null;
+    }
+    if (typeof window !== "undefined" && window.pc) {
+      window.pc = null;
+    }
+    webrtcPeerReadyRef.current = false;
+  };
+
+  const buildRtcConfiguration = (iceServers, includeTurn) => ({
+    iceServers: dedupeIceServers(iceServers),
+    iceTransportPolicy: "all",
+    iceCandidatePoolSize: includeTurn ? 2 : 0,
+    bundlePolicy: "max-bundle",
+    rtcpMuxPolicy: "require",
+  });
+
   const getRouteClassification = (localType, remoteType) => {
     if (!localType || !remoteType) return "unknown";
     const l = localType.toLowerCase();
@@ -173,6 +241,52 @@ export default function CallManager({ user, debug }) {
     mediaConnectedSentRef.current = true;
     sendSignaling({ action: "media_connected", call_id: callIdRef.current });
     logWebRTC("MEDIA_CONNECTED_SENT", { callId: callIdRef.current });
+  };
+
+  const escalateToTurn = async () => {
+    const pc = pcRef.current;
+    if (!pc || turnEscalatedRef.current) return;
+
+    turnEscalatedRef.current = true;
+    turnFallbackOccurredRef.current = true;
+    log.turn("Escalating ICE config to include TURN servers.");
+
+    try {
+      const res = await callAPI.getIceServers(false, false);
+      const turnServers = mapIceServersFromApi(res?.iceServers);
+      const fullConfig = buildRtcConfiguration(
+        [...DEFAULT_STUN_SERVERS, ...turnServers],
+        true,
+      );
+      pc.setConfiguration(fullConfig);
+      log.turn("TURN servers applied via setConfiguration.");
+    } catch (err) {
+      log.error("TURN escalation failed:", err);
+    }
+  };
+
+  const startP2pWatchdog = () => {
+    if (p2pTimeoutRef.current) clearTimeout(p2pTimeoutRef.current);
+    p2pTimeoutRef.current = setTimeout(async () => {
+      const pc = pcRef.current;
+      if (!pc) return;
+      const ice = pc.iceConnectionState;
+      if (ice === "connected" || ice === "completed") return;
+
+      log.turn(`P2P watchdog expired (${P2P_WATCHDOG_MS}ms) — adding TURN fallback.`);
+      await escalateToTurn();
+
+      if (isInitiatorRef.current && pcRef.current) {
+        try {
+          const offer = await pcRef.current.createOffer({ iceRestart: true });
+          await pcRef.current.setLocalDescription(offer);
+          sendSignaling({ action: "offer", sdp: offer.sdp });
+          log.turn("ICE restart offer sent after TURN escalation.");
+        } catch (err) {
+          log.error("ICE restart after TURN escalation failed:", err);
+        }
+      }
+    }, P2P_WATCHDOG_MS);
   };
 
   const handleAddExtraMinutes = async (minutes = 60) => {
@@ -1105,7 +1219,7 @@ export default function CallManager({ user, debug }) {
             (candidateCountsRef.current.srflx || 0) +
             (candidateCountsRef.current.relay || 0),
         });
-        sendSignaling({ action: "ice_candidate", candidate: event.candidate });
+        sendSignaling({ action: "ice_candidate", candidate: serializeIceCandidate(event.candidate) });
       } else {
         logWebRTC("ICE_GATHERING_NULL_CANDIDATE", {
           meaning: "local gathering complete",
@@ -1265,6 +1379,12 @@ export default function CallManager({ user, debug }) {
         await runPeerOperation("handleRemoteOffer", async () => {
           logWebRTC("SDP_OFFER_RECEIVED", { sdpType: "offer" });
           const pc = pcRef.current;
+          const isIceRestartOffer = pc.signalingState === "stable"
+            && !!pc.remoteDescription
+            && !!pc.localDescription;
+          if (isIceRestartOffer && !turnEscalatedRef.current) {
+            await escalateToTurn();
+          }
           const sdpKey = remoteSdpKey("offer", msg.sdp);
           if (appliedRemoteSdpKeysRef.current.has(sdpKey)) {
             logWebRTC("SDP_OFFER_IGNORED", { reason: "duplicate_remote_offer" });
@@ -1445,6 +1565,7 @@ export default function CallManager({ user, debug }) {
           setCallId(msg.call_id);
           callIdRef.current = msg.call_id;
         }
+        setIsAccepting(false);
         setCallState("active");
         setIsMediaConnected(false);
         break;
@@ -1476,10 +1597,12 @@ export default function CallManager({ user, debug }) {
         alert("🎉 Match saved! Both users voted to keep contact.");
         break;
       case "call.ended":
+        setIsAccepting(false);
         cleanupCall();
         setTimeout(() => alert(`Call ended. Reason: ${msg.reason || "disconnect"}. Duration: ${msg.duration || 0}s`), 100);
         break;
       case "error":
+        setIsAccepting(false);
         cleanupCall();
         setTimeout(() => alert(`Calling Error: ${msg.message}`), 100);
         break;
@@ -1596,22 +1719,29 @@ export default function CallManager({ user, debug }) {
   // is in the dep array. Without it, any re-render with callState==="active" and a
   // changed callType (e.g. from a race on first render) would destroy the live PC.
   useEffect(() => {
-    if (callState === "active") {
-      if (webrtcSetupRunningRef.current) {
-        // Already running for this call session — just keep the ref in sync.
-        callTypeRef.current = callType;
-        return;
-      }
-      callTypeRef.current = callType; // force-sync ahead of async useEffect flush
-      webrtcSetupRunningRef.current = true;
-      setupWebRTCPeer(isInitiatorRef.current).finally(() => {
-        // Leave the flag set until cleanupCall resets it (via callState -> idle).
-      });
-    } else {
-      // Any non-active state (idle, incoming, ringing) clears the guard.
+    if (callState !== "active") {
       webrtcSetupRunningRef.current = false;
+      return;
     }
-  }, [callState, callType]);
+
+    callTypeRef.current = callType;
+    if (webrtcSetupRunningRef.current) return;
+
+    webrtcSetupRunningRef.current = true;
+    const generation = ++webrtcSetupGenerationRef.current;
+
+    setupWebRTCPeer(isInitiatorRef.current, generation).finally(() => {
+      if (webrtcSetupGenerationRef.current === generation) {
+        webrtcSetupRunningRef.current = false;
+      }
+    });
+
+    return () => {
+      if (callStateRef.current !== "active") {
+        webrtcSetupGenerationRef.current += 1;
+      }
+    };
+  }, [callState]);
 
 
 
@@ -1710,10 +1840,12 @@ export default function CallManager({ user, debug }) {
   // Phase 2 — RTCPeerConnection config
   // Phase 6A — P2P primary attempt with 15s watchdog
   // ───────────────────────────────────────────────────────────────────────────
-  const setupWebRTCPeer = async (isInitiator) => {
+  const setupWebRTCPeer = async (isInitiator, generation) => {
+    const isStale = () => generation !== webrtcSetupGenerationRef.current
+      || callStateRef.current !== "active";
+
     webrtcPeerReadyRef.current = false;
-    // Tear down any existing PC
-    if (pcRef.current) { try { pcRef.current.close(); } catch { } pcRef.current = null; }
+    closePeerConnection();
 
     // Full state reset (DO NOT clear signalingQueueRef.current here)
     pendingIceCandidates.current = [];
@@ -1766,39 +1898,27 @@ export default function CallManager({ user, debug }) {
     setIsReconnecting(false);
 
     try {
-      let dynamicServers = [];
+      let stunServers = [...DEFAULT_STUN_SERVERS];
       try {
-        const res = await callAPI.getIceServers(false, false);
-        if (res && res.iceServers) {
-          dynamicServers = res.iceServers.map(s => {
-            const c = { urls: s.urls };
-            if (s.username) c.username = s.username;
-            if (s.credential) c.credential = s.credential;
-            return c;
-          });
+        const res = await callAPI.getIceServers(false, true);
+        if (res?.iceServers?.length) {
+          stunServers = [...DEFAULT_STUN_SERVERS, ...mapIceServersFromApi(res.iceServers)];
         }
       } catch (err) {
-        log.error("Failed to fetch initial ICE servers:", err);
+        log.error("Failed to fetch STUN-only ICE servers, using defaults:", err);
       }
 
-      const defaultIceServers = [
-        { urls: 'stun:stun.l.google.com:19302' },
-        { urls: 'stun:stun1.l.google.com:19302' },
-        { urls: 'stun:stun2.l.google.com:19302' },
-        { urls: 'stun:stun.cloudflare.com:3478' }
-      ];
+      if (isStale()) return;
 
-      const configuration = {
-        iceServers: [...defaultIceServers, ...dynamicServers],
-        iceTransportPolicy: 'all', 
-        iceCandidatePoolSize: 2,
-        bundlePolicy: 'max-bundle',
-        rtcpMuxPolicy: 'require'
-      };
-
-      log.ice(`Initialising RTCPeerConnection with fixed configuration`);
+      const configuration = buildRtcConfiguration(stunServers, false);
+      log.ice("Initialising RTCPeerConnection (STUN-only phase, P2P preferred)");
 
       const pc = new RTCPeerConnection(configuration);
+      if (isStale()) {
+        pc.close();
+        return;
+      }
+
       pcRef.current = pc;
       window.pc = pc;
 
@@ -1814,6 +1934,7 @@ export default function CallManager({ user, debug }) {
           // Phase 8 — start with constrained resolution for mobile
           const constraints = getMediaConstraints(needsVideo);
           localStreamRef.current = await navigator.mediaDevices.getUserMedia(constraints);
+          if (isStale()) return;
           log.webrtc(`Local media acquired (video=${needsVideo})`);
         } catch (mediaErr) {
           log.warn("getUserMedia failed — using loopback placeholder:", mediaErr);
@@ -1839,18 +1960,26 @@ export default function CallManager({ user, debug }) {
       // Attach tracks, transceivers, and data channel BEFORE creating any offer/answer (Caller only)
       if (localStreamRef.current && isInitiator) {
         await syncSendersWithTracks(pc);
+        if (isStale()) return;
         setupDataChannel(pc, isInitiator);
         if (debug) console.log("[WEBRTC] Local transceivers, tracks, and data channel initialized.");
       }
 
       if (isInitiator) {
         await createAndSendOffer({}, "initial");
+        if (isStale()) return;
       }
+
+      if (isStale()) return;
 
       webrtcPeerReadyRef.current = true;
       await processSignalingQueue();
+      startP2pWatchdog();
     } catch (err) {
       log.error("setupWebRTCPeer fatal error:", err);
+      if (generation === webrtcSetupGenerationRef.current) {
+        closePeerConnection();
+      }
     }
   };
 
@@ -1941,6 +2070,10 @@ export default function CallManager({ user, debug }) {
       alert("⚠️ Connection lost. Cannot join Blind Date room.");
       return;
     }
+    const myId = user?.id || "";
+    isInitiatorRef.current = String(myId).toLowerCase() < String(otherUserId).toLowerCase();
+    log.webrtc(`Blind Date room ${sessionId}. isInitiator=${isInitiatorRef.current}`);
+
     try {
       const stream = await navigator.mediaDevices.getUserMedia(getMediaConstraints(true));
       localStreamRef.current = stream;
@@ -1954,12 +2087,8 @@ export default function CallManager({ user, debug }) {
     setCallType("blind_date");
     setChatSaved(false);
     setCameraUnlocked(false);
+    setIsAccepting(true);
     sendSignaling({ action: "accept", call_id: sessionId });
-
-    // Deterministic initiator selection (lexicographic UUID comparison)
-    const myId = user?.id || "";
-    isInitiatorRef.current = String(myId).toLowerCase() < String(otherUserId).toLowerCase();
-    log.webrtc(`Blind Date room ${sessionId}. isInitiator=${isInitiatorRef.current}`);
   };
 
   const acceptCall = async () => {
@@ -1972,10 +2101,10 @@ export default function CallManager({ user, debug }) {
       const stream = await navigator.mediaDevices.getUserMedia(getMediaConstraints(needsVideo));
       localStreamRef.current = stream;
       isInitiatorRef.current = false;
-      setCallState("active");
-      setIsMediaConnected(false);
+      setIsAccepting(true);
       sendSignaling({ action: "accept", call_id: callId });
     } catch (err) {
+      setIsAccepting(false);
       alert("⚠️ Camera/microphone access required to accept the call.");
       log.error("getUserMedia failed on acceptCall:", err);
     }
@@ -2031,22 +2160,13 @@ export default function CallManager({ user, debug }) {
     if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null;
     if (remoteAudioRef.current) remoteAudioRef.current.srcObject = null;
 
-    // Close peer connection — remove event handlers first to avoid state callbacks
-    if (pcRef.current) {
-      pcRef.current.oniceconnectionstatechange = null;
-      pcRef.current.onconnectionstatechange = null;
-      pcRef.current.onicegatheringstatechange = null;
-      pcRef.current.onicecandidate = null;
-      pcRef.current.ontrack = null;
-      pcRef.current.onsignalingstatechange = null;
-      pcRef.current.onnegotiationneeded = null;
-      pcRef.current.ondatachannel = null;
-      try { pcRef.current.close(); } catch { }
-      pcRef.current = null;
-    }
+    webrtcSetupGenerationRef.current += 1;
+    webrtcSetupRunningRef.current = false;
+    closePeerConnection();
 
     // Reset UI state
     setCallState("idle");
+    setIsAccepting(false);
     setDuration(0);
     setIsMediaConnected(false);
     setQuotaWarning(null);
@@ -2122,15 +2242,17 @@ export default function CallManager({ user, debug }) {
               <div className={callCss.avatar}>📞</div>
             </div>
             <h2 className={callCss.callerName}>{callerEmail.split("@")[0]}</h2>
-            <p className={callCss.callTypeLabel}>Incoming {callType.replace("_", " ")} call</p>
+            <p className={callCss.callTypeLabel}>
+              {isAccepting ? "Connecting..." : `Incoming ${callType.replace("_", " ")} call`}
+            </p>
           </div>
           <div className={callCss.incomingActions}>
             <div className={callCss.buttonRow}>
-              <button type="button" className={`${callCss.callBtn} ${callCss.declineBtn}`} onClick={declineOrEndCall}>
+              <button type="button" className={`${callCss.callBtn} ${callCss.declineBtn}`} onClick={declineOrEndCall} disabled={isAccepting}>
                 Decline
               </button>
-              <button type="button" className={`${callCss.callBtn} ${callCss.acceptBtn}`} onClick={acceptCall}>
-                Accept
+              <button type="button" className={`${callCss.callBtn} ${callCss.acceptBtn}`} onClick={acceptCall} disabled={isAccepting}>
+                {isAccepting ? "Connecting..." : "Accept"}
               </button>
             </div>
           </div>

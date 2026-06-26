@@ -1,0 +1,99 @@
+.page {
+  width: 100%;
+}
+
+.content {
+  width: 100%;
+  max-width: 480px;
+}
+
+.radarContainer {
+  width: 200px;
+  height: 200px;
+}
+
+.radarPlaceholder,
+.radarScanning {
+  width: 120px;
+  height: 120px;
+}
+
+.radarCenter,
+.radarCenterMatched,
+.radarWave1,
+.radarWave2,
+.radarWave3 {
+  width: 100px;
+  height: 100px;
+}
+
+.actionCard {
+  width: 100%;
+}
+
+.guidelinesCard {
+  width: 100%;
+}
+
+
+@media (max-width: 767px) {
+  .page {
+    padding: 24px 16px 32px !important;
+  }
+
+  .content {
+    gap: 24px !important;
+  }
+
+  .title {
+    font-size: 22px !important;
+  }
+
+  .subTitle {
+    font-size: 12px !important;
+    max-width: 100% !important;
+  }
+
+  .radarContainer {
+    width: 100% !important;
+    max-width: 300px !important;
+    padding: 20px 0 !important;
+  }
+
+  .radarPlaceholder,
+  .radarScanning {
+    width: 160px !important;
+    height: 160px !important;
+  }
+
+  .radarCenter,
+  .radarCenterMatched {
+    width: 120px !important;
+    height: 120px !important;
+  }
+
+  .radarWave1,
+  .radarWave2,
+  .radarWave3 {
+    width: 120px !important;
+    height: 120px !important;
+  }
+
+  .actionCard {
+    padding: 18px 16px !important;
+  }
+
+  .statusText,
+  .timerText {
+    font-size: 13px !important;
+  }
+
+  .startBtn,
+  .stopBtn {
+    min-height: 44px !important;
+  }
+
+  .guidelinesCard {
+    padding: 16px !important;
+  }
+}

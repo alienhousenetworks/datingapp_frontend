@@ -1,0 +1,276 @@
+/* ── Desktop: unchanged card sizing via inline styles ── */
+
+/* ── Mobile feed card (no full-screen horizontal carousel) ── */
+@media (max-width: 999px) {
+  .card {
+    width: 100% !important;
+    max-width: none !important;
+    margin: 0 !important;
+    border-radius: 0 !important;
+    border: none !important;
+    height: auto !important;
+    min-height: 0 !important;
+    max-height: none !important;
+    flex-shrink: 0;
+    scroll-snap-align: none !important;
+    box-shadow: none !important;
+    overflow-x: hidden !important;
+    overflow-y: visible !important;
+    box-sizing: border-box !important;
+    display: flex !important;
+    flex-direction: column !important;
+    position: relative !important;
+  }
+
+  .mobileCard {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    width: 100%;
+    height: auto;
+    overflow-x: hidden;
+    overflow-y: visible;
+    position: relative;
+    padding-bottom: 24px;
+    border-bottom: 1px solid var(--dark-700);
+  }
+
+  .mobilePolaroidWrap {
+    position: relative;
+    width: calc(100% - 48px);
+    margin: 20px auto 10px;
+    aspect-ratio: 3 / 4;
+    perspective: 1000px;
+  }
+
+  .mobilePolaroidBack {
+    position: absolute;
+    inset: 0;
+    transform: rotate(-6deg) scale(0.95);
+    background: #fff;
+    padding: 8px 8px 30px;
+    box-shadow: 0 4px 15px rgba(0,0,0,0.3);
+    z-index: 1;
+    border-radius: 4px;
+  }
+  .mobilePolaroidBack img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    filter: brightness(0.7);
+  }
+
+  .mobilePolaroidFront {
+    position: absolute;
+    inset: 0;
+    transform: rotate(3deg);
+    background: #fff;
+    padding: 8px 8px 36px;
+    box-shadow: 0 8px 25px rgba(0,0,0,0.4);
+    z-index: 2;
+    border-radius: 4px;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .mobileHeroScroll {
+    flex: 1;
+    width: 100%;
+    display: flex;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scroll-snap-type: x mandatory;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+    touch-action: pan-x pan-y;
+    overscroll-behavior-x: contain;
+    background: var(--dark-800);
+  }
+  .mobileHeroScroll::-webkit-scrollbar {
+    display: none;
+  }
+
+  .mobileHeroSlide {
+    flex: 0 0 100%;
+    min-width: 100%;
+    height: 100%;
+    scroll-snap-align: start;
+    position: relative;
+  }
+
+  .mobileHeroImg {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+    user-select: none;
+    -webkit-user-drag: none;
+  }
+
+  .mobileHeroPlaceholder {
+    flex: 1;
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 48px;
+    color: var(--dark-400);
+    background: var(--dark-800);
+  }
+
+  .mobileDots {
+    position: absolute;
+    bottom: 12px;
+    left: 0;
+    right: 0;
+    display: flex;
+    justify-content: center;
+    gap: 6px;
+    z-index: 3;
+    pointer-events: none;
+  }
+  .mobileDot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: rgba(0,0,0,0.2);
+    transition: background 0.2s, transform 0.2s;
+  }
+  .mobileDotActive {
+    background: var(--dark-800);
+    transform: scale(1.2);
+  }
+
+  .mobileBadgeLeft, .mobileBadgeRight {
+    position: absolute;
+    bottom: -15px;
+    width: 48px;
+    height: 48px;
+    border-radius: 50%;
+    background: #8bd969;
+    border: 3px solid #fff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 4px 10px rgba(0,0,0,0.2);
+    z-index: 4;
+  }
+  .mobileBadgeLeft {
+    left: -10px;
+  }
+  .mobileBadgeRight {
+    right: -10px;
+    width: 56px;
+    height: 56px;
+    bottom: -20px;
+  }
+  .badgeEmoji {
+    font-size: 24px;
+  }
+
+  .mobileInfoCenter {
+    text-align: center;
+    padding: 20px 16px 10px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .mobileFunkyName {
+    font-family: 'Bungee', sans-serif;
+    font-size: 28px;
+    color: #FFD700;
+    margin: 0;
+    text-shadow: 2px 2px 4px rgba(0,0,0,0.6);
+    line-height: 1.1;
+    -webkit-text-stroke: 1px rgba(0,0,0,0.5);
+  }
+
+  .mobileHandwrittenRow {
+    font-family: 'Caveat', cursive;
+    font-size: 20px;
+    color: #FFD700;
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 16px;
+    font-weight: 700;
+    text-shadow: 1px 1px 2px rgba(0,0,0,0.8);
+  }
+
+  .mobileHandwrittenBio {
+    font-family: 'Caveat', cursive;
+    font-size: 18px;
+    color: #FFD700;
+    margin: 0;
+    line-height: 1.2;
+    text-shadow: 1px 1px 2px rgba(0,0,0,0.8);
+  }
+
+  .mobileActionCenter {
+    display: flex;
+    justify-content: center;
+    padding: 10px 0 20px;
+    margin-top: auto;
+  }
+
+  .mobileGlowingHeart {
+    width: 72px;
+    height: 72px;
+    border-radius: 50%;
+    border: 2px solid rgba(255,255,255,0.4);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: transform 0.1s;
+    outline: none;
+  }
+  .mobileGlowingHeart:active {
+    transform: scale(0.9);
+  }
+
+  .mobileBody {
+    padding: 0 14px 20px;
+  }
+
+  .mobileTags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 8px;
+  }
+
+  .mobileTag {
+    font-size: 11px;
+    padding: 4px 10px;
+    border-radius: 4px;
+    background: var(--dark-700);
+    color: var(--dark-100);
+    font-weight: 500;
+  }
+
+  .mobileMood {
+    display: inline-block;
+    font-size: 11px;
+    padding: 4px 10px;
+    border-radius: 4px;
+    background: var(--dark-700);
+    color: var(--dark-100);
+    margin-bottom: 8px;
+  }
+
+  .instaBio {
+    font-size: 14px;
+    line-height: 1.4;
+    color: #fff;
+    margin: 0;
+  }
+  .instaBioName {
+    font-weight: 600;
+    margin-right: 6px;
+  }
+
+}

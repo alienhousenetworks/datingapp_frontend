@@ -1,0 +1,80 @@
+.page {
+  /* keep default desktop layout */
+}
+
+.header {
+  /* keep default desktop layout */
+}
+
+.headerRight {
+  /* keep default desktop layout */
+}
+
+.filters {
+  /* keep default desktop layout */
+}
+
+.composeBtn {
+  /* keep default desktop layout */
+}
+
+.feed {
+  /* keep default desktop layout */
+}
+
+.modal {
+  /* keep default desktop layout */
+}
+
+.textarea {
+  /* keep default desktop layout */
+}
+
+@media (max-width: 767px) {
+  .page {
+    overflow: visible !important;
+  }
+
+  .header {
+    flex-direction: column !important;
+    align-items: center !important;
+    justify-content: center !important;
+    text-align: center !important;
+    gap: 12px !important;
+  }
+
+  .headerRight {
+    width: 100% !important;
+    flex-direction: column !important;
+    align-items: center !important;
+    gap: 12px !important;
+  }
+
+  .filters {
+    flex-wrap: wrap !important;
+    justify-content: center !important;
+    width: 100% !important;
+    gap: 8px !important;
+  }
+
+  .composeBtn {
+    width: min(100%, 340px) !important;
+    max-width: 100% !important;
+  }
+
+  .feed {
+    grid-template-columns: 1fr !important;
+    padding: 16px 14px !important;
+    gap: 14px !important;
+  }
+
+  .modal {
+    width: min(100%, 92vw) !important;
+    max-width: 420px !important;
+    padding: 20px !important;
+  }
+
+  .textarea {
+    min-height: 160px !important;
+  }
+}

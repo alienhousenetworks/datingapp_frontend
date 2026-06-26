@@ -1,0 +1,17 @@
+.content {
+  /* default content styling is controlled by inline styles for tablet/laptop/desktop */
+}
+
+@media (max-width: 767px) {
+  .content {
+    display: grid !important;
+    grid-template-columns: 1fr !important;
+    align-items: stretch !important;
+    gap: 16px !important;
+    padding: 18px 14px !important;
+  }
+
+  .col {
+    display: contents !important;
+  }
+}

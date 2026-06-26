@@ -1,0 +1,2341 @@
+import React, { useState, useEffect, useRef } from "react";
+import { callAPI, getValidAccessToken, wsURL, authAPI } from "../api";
+import callCss from "../styles/CallManager.module.css";
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 1 — Centralized structured logger
+// logWebRTC(stage, data) is the canonical API required by the spec.
+// Emits: [WEBRTC][<STAGE>] { timestamp, ...data }
+// Legacy log.* aliases preserved so all existing call sites compile unchanged.
+// ─────────────────────────────────────────────────────────────────────────────
+function logWebRTC(stage, data = {}) {
+  console.log(`[WEBRTC][${stage}]`, {
+    timestamp: new Date().toISOString(),
+    ...data,
+  });
+}
+
+const log = {
+  webrtc: (...a) => logWebRTC("WEBRTC", { detail: a }),
+  ice: (...a) => logWebRTC("ICE", { detail: a }),
+  signaling: (...a) => logWebRTC("SIGNALING", { detail: a }),
+  turn: (...a) => logWebRTC("TURN", { detail: a }),
+  restart: (...a) => logWebRTC("RESTART", { detail: a }),
+  stats: (...a) => logWebRTC("STATS", { detail: a }),
+  warn: (...a) => { console.warn(`[WEBRTC][WARN]`, { timestamp: new Date().toISOString(), detail: a }); },
+  error: (...a) => { console.error(`[WEBRTC][ERROR]`, { timestamp: new Date().toISOString(), detail: a }); },
+};
+
+// Phase 6 timing constants (tuned for India mobile networks)
+const DISCONNECT_GRACE_MS = 6000;  // wait before ICE restart on "disconnected"
+const ICE_RESTART_COOLDOWN = 8000;  // min gap between restarts
+const MAX_RECOVERY_CYCLES = 2;     // ICE restart attempts before TURN escalation
+
+export default function CallManager({ user, debug }) {
+  const [callState, setCallState] = useState("idle"); // idle, ringing, incoming, active
+  const [callType, setCallType] = useState("voice");
+  const [callerEmail, setCallerEmail] = useState("");
+  const [callId, setCallId] = useState("");
+
+  const callStateRef = useRef("idle");
+  const callIdRef = useRef("");
+  const callTypeRef = useRef("voice");
+
+  useEffect(() => { callStateRef.current = callState; }, [callState]);
+  useEffect(() => { callIdRef.current = callId; }, [callId]);
+  useEffect(() => { callTypeRef.current = callType; }, [callType]);
+
+  // Active call UI state
+  const [duration, setDuration] = useState(0);
+  const [muted, setMuted] = useState(false);
+  const [cameraActive, setCameraActive] = useState(true);
+  const [chatSaved, setChatSaved] = useState(false);
+  const [cameraUnlocked, setCameraUnlocked] = useState(false);
+  const [isReconnecting, setIsReconnecting] = useState(false);
+  const [isMediaConnected, setIsMediaConnected] = useState(false);
+  const [quotaWarning, setQuotaWarning] = useState(null);
+  const [isAddingMinutes, setIsAddingMinutes] = useState(false);
+  const mediaConnectedSentRef = useRef(false);
+
+  // Media refs
+  const localVideoRef = useRef(null);
+  const remoteVideoRef = useRef(null);
+  const remoteAudioRef = useRef(null);
+
+  // WebRTC & socket refs
+  const socketRef = useRef(null);
+  const pcRef = useRef(null);
+  const localStreamRef = useRef(null);
+  const remoteStreamRef = useRef(null);
+  const timerRef = useRef(null);
+  const isInitiatorRef = useRef(false);
+  const signalingQueueRef = useRef([]);
+  const isProcessingQueueRef = useRef(false);
+  const remoteDescriptionAppliedRef = useRef(false);
+  const isNegotiatingRef = useRef(false);
+  const negotiationQueuedRef = useRef(false);
+  const negotiationChainRef = useRef(Promise.resolve());
+  const webrtcSetupRunningRef = useRef(false); // guard: prevent double-invoke of setupWebRTCPeer
+  const webrtcPeerReadyRef = useRef(false);
+  const rtcStateRef = useRef("IDLE");
+  const initialNegotiationStartedRef = useRef(false);
+  const appliedRemoteSdpKeysRef = useRef(new Set());
+  const transceiversRef = useRef({ audio: null, video: null });
+  const dataChannelRef = useRef(null);
+
+  // ICE candidate tracking
+  const pendingIceCandidates = useRef([]);
+  const processedRemoteCandidatesRef = useRef(new Set());
+  const outgoingQueueRef = useRef([]);
+
+  // Phase 5 — ICE restart state
+  const lastIceRestartTimeRef = useRef(0);
+  const recoveryAttemptsRef = useRef(0);
+  const isRecoveringRef = useRef(false);
+  const disconnectTimerRef = useRef(null); // 6s grace timer for "disconnected"
+
+  // Phase 6 — TURN escalation state
+  const p2pTimeoutRef = useRef(null); // 15s P2P watchdog
+  const failureDiagnosisTimeoutRef = useRef(null); // Phase 9 failure engine
+  const turnEscalatedRef = useRef(false);
+  const turnFallbackOccurredRef = useRef(false);
+
+  // Phase 4 — Telemetry timestamps
+  const callStartTimeRef = useRef(0);
+  const offerCreatedTimeRef = useRef(0);
+  const answerReceivedTimeRef = useRef(0);
+  const iceConnectedTimeRef = useRef(0);
+  const firstMediaReceivedTimeRef = useRef(0);
+  const iceGatheringStartTimeRef = useRef(0);
+  const iceGatheringEndTimeRef = useRef(0);
+  const connectionStartTimeRef = useRef(0);
+  const connectionEndTimeRef = useRef(0);
+
+  // Phase 7 — Candidate analytics
+  const candidateCountsRef = useRef({ host: 0, srflx: 0, relay: 0 });
+  const localCandidateTypesRef = useRef({});
+  const remoteCandidateTypesRef = useRef({});
+  const selectedCandidatePairRef = useRef(null);
+  const candidatePairAnalyticsRef = useRef(null);
+
+  // Phase 7 — Connection quality telemetry
+  const rttHistoryRef = useRef([]);
+  const rttAverageRef = useRef(0);
+  const maxRttRef = useRef(0);
+  const lossAverageRef = useRef(0);
+  const maxPacketLossRef = useRef(0);
+  const jitterAverageRef = useRef(0);
+  const bitrateHistoryRef = useRef([]);
+  const lastStatsRef = useRef(null);
+  const currentBitrateRef = useRef(800 * 1000);
+  const metricsSubmittedRef = useRef(false);
+
+  // Stats polling
+  const statsIntervalRef = useRef(null);
+
+  // Debug panel state
+  const [debugIceState, setDebugIceState] = useState("new");
+  const [debugConnectionState, setDebugConnectionState] = useState("new");
+  const [remoteTrackStatus, setRemoteTrackStatus] = useState("Awaiting tracks...");
+  const [callErrorMessage, setCallErrorMessage] = useState(null);
+
+  const [debugMediaStatus, setDebugMediaStatus] = useState("Waiting...");
+  const [debugCurrentStep, setDebugCurrentStep] = useState("IDLE");
+
+  // Ringtone
+  const ringtoneRef = useRef(null);
+
+  // Keep handlers fresh across closures
+  const handleSocketMessageRef = useRef(null);
+  const cleanupCallRef = useRef(null);
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Helpers
+  // ───────────────────────────────────────────────────────────────────────────
+  const parseCandidateType = (candidateStr) => {
+    if (!candidateStr) return null;
+    const m = candidateStr.match(/typ\s+(\w+)/i);
+    return m ? m[1].toLowerCase() : null;
+  };
+
+  const getRouteClassification = (localType, remoteType) => {
+    if (!localType || !remoteType) return "unknown";
+    const l = localType.toLowerCase();
+    const r = remoteType.toLowerCase();
+    if (l === "relay" || r === "relay") return "relay-relay";
+    if (l === "host" && r === "host") return "host-host";
+    if (l === "srflx" || r === "srflx") return "srflx-srflx";
+    return `${l}-${r}`;
+  };
+
+  const notifyMediaConnected = () => {
+    if (mediaConnectedSentRef.current || !callIdRef.current) return;
+    mediaConnectedSentRef.current = true;
+    sendSignaling({ action: "media_connected", call_id: callIdRef.current });
+    logWebRTC("MEDIA_CONNECTED_SENT", { callId: callIdRef.current });
+  };
+
+  const handleAddExtraMinutes = async (minutes = 60) => {
+    setIsAddingMinutes(true);
+    try {
+      const res = await callAPI.addMinutes(minutes);
+      setQuotaWarning(null);
+      alert(`Added ${res.minutes_added || minutes} extra minutes. You can keep calling.`);
+    } catch (err) {
+      alert(err.message || "Could not add extra minutes. Please try again.");
+    } finally {
+      setIsAddingMinutes(false);
+    }
+  };
+
+  const sendSignaling = (payload) => {
+    if (socketRef.current?.readyState === WebSocket.OPEN) {
+      log.signaling("send →", payload.action || payload.type);
+      socketRef.current.send(JSON.stringify(payload));
+    } else {
+      log.warn("sendSignaling: socket not open. Queueing payload:", payload.action || payload.type);
+      outgoingQueueRef.current.push(payload);
+    }
+  };
+
+  const flushOutgoingSignalingQueue = () => {
+    if (!socketRef.current || socketRef.current.readyState !== WebSocket.OPEN) return;
+    const queue = [...outgoingQueueRef.current];
+    outgoingQueueRef.current = [];
+    if (queue.length > 0) {
+      log.signaling(`Flushing ${queue.length} queued outgoing signaling messages.`);
+      for (const payload of queue) {
+        socketRef.current.send(JSON.stringify(payload));
+      }
+    }
+  };
+
+  const trace = (stage, message, data = {}) => {
+    console.log(`[${stage}] ${message}`, {
+      timestamp: new Date().toISOString(),
+      ...data,
+    });
+  };
+
+  const transitionRTCState = (next, data = {}) => {
+    const prev = rtcStateRef.current;
+    if (prev === next) return;
+    rtcStateRef.current = next;
+    setDebugCurrentStep(next);
+    trace("STATE", next.toLowerCase(), { previous: prev, ...data });
+    logWebRTC("STATE_TRANSITION", { from: prev, to: next, ...data });
+  };
+
+  const runPeerOperation = (label, operation) => {
+    const run = negotiationChainRef.current
+      .catch(() => { })
+      .then(async () => {
+        trace("SDP", `${label} started`);
+        const result = await operation();
+        trace("SDP", `${label} completed`);
+        return result;
+      });
+    negotiationChainRef.current = run.catch((err) => {
+      log.error(`[SDP] ${label} failed:`, err);
+    });
+    return run;
+  };
+
+  const remoteSdpKey = (type, sdp) => `${type}:${sdp || ""}`;
+
+
+  //need to be fixed later
+
+  // const ensureTransceiver = (kind, track = null, pc = pcRef.current) => {
+  //   if (!pc) return null;
+
+  //   const cached = transceiversRef.current[kind];
+  //   if (cached && cached.direction !== "stopped") return cached;
+
+  //   const existing = pc.getTransceivers().find((transceiver) => (
+  //     transceiver.sender?.track?.kind === kind ||
+  //     transceiver.receiver?.track?.kind === kind ||
+  //     transceiver.mid === kind
+  //   ) && transceiver.direction !== "stopped");
+  //   if (existing) {
+  //     transceiversRef.current[kind] = existing;
+  //     trace("MEDIA", `${kind} transceiver reused`, { mid: existing.mid, direction: existing.direction });
+  //     return existing;
+  //   }
+
+  //   if (initialNegotiationStartedRef.current) {
+  //     throw new Error(`Refusing to add ${kind} transceiver after initial negotiation started`);
+  //   }
+
+  //   const needsVideo = callTypeRef.current === "video" || callTypeRef.current === "blind_date";
+  //   const direction = kind === "video" && !needsVideo ? "inactive" : "sendrecv";
+  //   const init = { direction };
+
+  //   if (track) {
+  //     init.streams = [localStreamRef.current].filter(Boolean);
+  //   }
+  //   // NOTE: Do NOT set sendEncodings with rid here. Simulcast with rid requires
+  //   // both peers to pre-negotiate a=simulcast lines in the SDP. The callee creates
+  //   // its transceiver in response to the offer (no rid), so the m-line is
+  //   // negotiated without simulcast — mismatched rids cause ontrack to fire with a
+  //   // muted/ended track on Firefox, and silently kill layers on Chrome.
+  //   // Bitrate limits are applied post-negotiation via sender.setParameters().
+
+  //   const transceiver = track
+  //     ? pc.addTransceiver(track, init)
+  //     : pc.addTransceiver(kind, init);
+  //   transceiversRef.current[kind] = transceiver;
+  //   trace("MEDIA", `${kind} transceiver created`, { direction });
+  //   logWebRTC("TRANSCEIVER_CREATED", { kind, direction });
+  //   return transceiver;
+  // };
+
+
+
+
+  const ensureTransceiver = (kind, track = null, pc = pcRef.current) => {
+    if (!pc) return null;
+
+    const cached = transceiversRef.current[kind];
+    if (cached && cached.direction !== "stopped") return cached;
+
+    const allTransceivers = pc.getTransceivers();
+
+    // First: match by sender or receiver track kind (works post-negotiation)
+    const byTrack = allTransceivers.find((t) => {
+      const sKind = t.sender?.track?.kind;
+      const rKind = t.receiver?.track?.kind;
+      return (sKind === kind || rKind === kind) && t.direction !== "stopped";
+    });
+    if (byTrack) {
+      transceiversRef.current[kind] = byTrack;
+      return byTrack;
+    }
+
+    // Second: match by mid order — audio=mid"0", video=mid"1"
+    // This is the callee path: transceivers exist from setRemoteDescription
+    // but have no sender track yet, so track-kind matching fails.
+    const midIndex = kind === "audio" ? "0" : "1";
+    const byMid = allTransceivers.find((t) =>
+      t.mid === midIndex && t.direction !== "stopped"
+    );
+    if (byMid) {
+      transceiversRef.current[kind] = byMid;
+      trace("MEDIA", `${kind} transceiver matched by mid`, { mid: byMid.mid, direction: byMid.direction });
+      return byMid;
+    }
+
+    // Third: only create new if no negotiation has started
+    if (initialNegotiationStartedRef.current) {
+      throw new Error(`Refusing to add ${kind} transceiver after initial negotiation started`);
+    }
+
+    const needsVideo = callTypeRef.current === "video" || callTypeRef.current === "blind_date";
+    const direction = kind === "video" && !needsVideo ? "inactive" : "sendrecv";
+    const init = { direction };
+    if (track) init.streams = [localStreamRef.current].filter(Boolean);
+
+    const transceiver = track
+      ? pc.addTransceiver(track, init)
+      : pc.addTransceiver(kind, init);
+
+    transceiversRef.current[kind] = transceiver;
+    trace("MEDIA", `${kind} transceiver newly created`, { direction });
+    logWebRTC("TRANSCEIVER_CREATED", { kind, direction });
+    return transceiver;
+  };
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  const getMediaConstraints = (needsVideo) => ({
+    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+    video: needsVideo ? {
+      width: { min: 320, ideal: 640, max: 1280 },
+      height: { min: 240, ideal: 480, max: 720 },
+      aspectRatio: { ideal: 1.333 },
+      frameRate: { min: 15, ideal: 24, max: 30 },
+    } : false,
+  });
+
+  const assertMediaTracksReady = () => {
+    const localStream = localStreamRef.current;
+    if (!localStream) throw new Error("Local media stream is not available");
+
+    const audioTrack = localStream.getAudioTracks()[0];
+    if (!audioTrack) throw new Error("Missing audio track");
+    if (!audioTrack.enabled || audioTrack.readyState !== "live") {
+      throw new Error(`Audio track not ready: enabled=${audioTrack.enabled} readyState=${audioTrack.readyState}`);
+    }
+
+    const needsVideo = callTypeRef.current === "video" || callTypeRef.current === "blind_date";
+    if (needsVideo) {
+      const videoTrack = localStream.getVideoTracks()[0];
+      if (!videoTrack) throw new Error("Missing video track before SDP offer");
+      if (!videoTrack.enabled || videoTrack.readyState !== "live") {
+        throw new Error(`Video track not ready: enabled=${videoTrack.enabled} readyState=${videoTrack.readyState}`);
+      }
+    }
+    trace("MEDIA", "tracks ready", { needsVideo });
+  };
+
+  const syncSendersWithTracks = async (pc = pcRef.current) => {
+    if (!pc || !localStreamRef.current) return;
+
+    assertMediaTracksReady();
+    const audioTrack = localStreamRef.current.getAudioTracks()[0];
+    const videoTrack = localStreamRef.current.getVideoTracks()[0] || null;
+    const needsVideo = callTypeRef.current === "video" || callTypeRef.current === "blind_date";
+
+    const audioTransceiver = ensureTransceiver("audio", audioTrack, pc);
+    if (audioTransceiver.sender.track !== audioTrack) {
+      await audioTransceiver.sender.replaceTrack(audioTrack);
+    }
+    audioTransceiver.direction = "sendrecv";
+    trace("MEDIA", "audio sender attached", {
+      enabled: audioTrack.enabled,
+      readyState: audioTrack.readyState,
+    });
+
+    const videoTransceiver = ensureTransceiver("video", needsVideo ? videoTrack : null, pc);
+    if (needsVideo) {
+      if (videoTransceiver.sender.track !== videoTrack) {
+        await videoTransceiver.sender.replaceTrack(videoTrack);
+      }
+      videoTransceiver.direction = "sendrecv";
+      trace("MEDIA", "video sender attached", {
+        enabled: videoTrack.enabled,
+        readyState: videoTrack.readyState,
+        direction: videoTransceiver.direction,
+      });
+    } else {
+      if (videoTransceiver.sender.track) {
+        await videoTransceiver.sender.replaceTrack(null);
+      }
+      videoTransceiver.direction = "inactive";
+      trace("MEDIA", "video sender inactive for voice call");
+    }
+  };
+
+  const setupDataChannel = (pc = pcRef.current, isInitiator = isInitiatorRef.current) => {
+    if (!pc) return;
+    pc.ondatachannel = (event) => {
+      dataChannelRef.current = event.channel;
+      wireDataChannel(event.channel, "remote");
+    };
+    if (!isInitiator || dataChannelRef.current) return;
+    if (initialNegotiationStartedRef.current) {
+      trace("SDP", "datachannel creation skipped after initial negotiation");
+      return;
+    }
+    const channel = pc.createDataChannel("call-control", { ordered: true });
+    dataChannelRef.current = channel;
+    wireDataChannel(channel, "local");
+    trace("SDP", "datachannel created pre-offer", { label: channel.label });
+  };
+
+  const wireDataChannel = (channel, origin) => {
+    channel.onopen = () => trace("SDP", "datachannel open", { origin, label: channel.label });
+    channel.onclose = () => trace("SDP", "datachannel closed", { origin, label: channel.label });
+    channel.onerror = (event) => log.error("[SDP] datachannel error:", event);
+  };
+
+  const createAndSendOffer = async (options = {}, reason = "offer") => {
+    if (isNegotiatingRef.current) {
+      negotiationQueuedRef.current = true;
+      trace("SDP", "renegotiation queued", { reason });
+      return false;
+    }
+
+    return runPeerOperation(`createOffer:${reason}`, async () => {
+      const pc = pcRef.current;
+      if (!pc) return false;
+      if (pc.signalingState !== "stable") {
+        negotiationQueuedRef.current = true;
+        logWebRTC("NEGOTIATION_SKIPPED", { reason, signalingState: pc.signalingState });
+        return false;
+      }
+
+      isNegotiatingRef.current = true;
+      try {
+        transitionRTCState("CREATING_OFFER", { reason });
+        await syncSendersWithTracks(pc);
+        setupDataChannel(pc, isInitiatorRef.current);
+        initialNegotiationStartedRef.current = true;
+        const offer = await pc.createOffer(options);
+        logWebRTC("SDP_OFFER_CREATED", { sdpType: "offer", reason, offerCreatedAt: Date.now() });
+        await pc.setLocalDescription(offer);
+        logWebRTC("SDP_LOCAL_DESC_SET", { sdpType: "offer", reason });
+        offerCreatedTimeRef.current = Date.now();
+        transitionRTCState("WAITING_ANSWER", { reason });
+        sendSignaling({ action: "offer", sdp: offer.sdp });
+        logWebRTC("SDP_OFFER_SENT", { reason });
+        return true;
+      } finally {
+        isNegotiatingRef.current = false;
+      }
+    });
+  };
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Phase 9 — TURN escalation timer management (clear on reuse)
+  // ───────────────────────────────────────────────────────────────────────────
+  const clearAllTimers = () => {
+    if (p2pTimeoutRef.current) { clearTimeout(p2pTimeoutRef.current); p2pTimeoutRef.current = null; }
+    if (disconnectTimerRef.current) { clearTimeout(disconnectTimerRef.current); disconnectTimerRef.current = null; }
+    if (failureDiagnosisTimeoutRef.current) { clearTimeout(failureDiagnosisTimeoutRef.current); failureDiagnosisTimeoutRef.current = null; }
+  };
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Phase 9 — WebRTC Auto-Diagnosis Classification Engine
+  // Runs 15s after connection establishment starts, classifies failure mode.
+  // ───────────────────────────────────────────────────────────────────────────
+  const runFailureClassification = () => {
+    const pc = pcRef.current;
+    if (!pc) return;
+
+    let reason = "UNKNOWN";
+    const iceState = pc.iceConnectionState;
+    const connState = pc.connectionState;
+    const hasMedia = firstMediaReceivedTimeRef.current > 0;
+
+    // DTLS failed states
+    const dtlsFailed = connState === "failed" || connState === "closed";
+
+    // Video render check (ensure video element state is ready and rendering)
+    const remoteVideo = remoteVideoRef.current;
+    const isVideoRendering = remoteVideo &&
+      remoteVideo.readyState >= 3 && // HAVE_FUTURE_DATA
+      !remoteVideo.paused &&
+      remoteVideo.videoWidth > 0 &&
+      remoteVideo.currentTime > 0;
+
+    if (iceState === "failed" || iceState === "disconnected") {
+      reason = "ICE_FAILURE";
+    } else if (dtlsFailed) {
+      reason = "DTLS_FAILURE";
+    } else if (!selectedCandidatePairRef.current && iceState !== "connected" && iceState !== "completed") {
+      reason = "ICE_PAIRING_FAILURE";
+    } else if (!hasMedia) {
+      reason = "MEDIA_NOT_FLOWING";
+    } else if (remoteVideo && !isVideoRendering) {
+      reason = "RENDERING_ISSUE";
+    } else if (hasMedia && (iceState === "connected" || iceState === "completed")) {
+      reason = "SUCCESS";
+    }
+
+    setDebugMediaStatus(hasMedia ? (isVideoRendering ? "Media Flowing & Rendering" : "Media Received (Not Rendering)") : "Failed: " + reason);
+
+    logWebRTC("FINAL_DIAGNOSIS", {
+      reason,
+      iceConnectionState: iceState,
+      connectionState: connState,
+      hasMedia,
+      firstMediaReceivedTimeMs: firstMediaReceivedTimeRef.current > 0
+        ? firstMediaReceivedTimeRef.current - callStartTimeRef.current
+        : null,
+      selectedPair: selectedCandidatePairRef.current,
+      videoRender: remoteVideo ? {
+        readyState: remoteVideo.readyState,
+        paused: remoteVideo.paused,
+        videoWidth: remoteVideo.videoWidth,
+        videoHeight: remoteVideo.videoHeight,
+        currentTime: remoteVideo.currentTime,
+        srcObjectSet: !!remoteVideo.srcObject,
+      } : null,
+    });
+  };
+
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Phase 7 — Stats collection
+  // ───────────────────────────────────────────────────────────────────────────
+  // ───────────────────────────────────────────────────────────────────────────
+  // Phase 5+7+8 — Stats collection
+  // Interval is 2s during initial connection phase, then 5s once stable.
+  // ───────────────────────────────────────────────────────────────────────────
+  const startStatsLoop = () => {
+    if (statsIntervalRef.current) clearInterval(statsIntervalRef.current);
+    // Start at 2s for fast DTLS/ICE diagnostics, bump to 5s after 30s
+    let intervalMs = 2000;
+    statsIntervalRef.current = setInterval(async () => {
+      if (!pcRef.current) return;
+      try {
+        const stats = await pcRef.current.getStats();
+        processStats(stats);
+        await logTransportStats(stats); // Phase 5 — DTLS inspection
+      } catch (err) {
+        log.error("[STATS] getStats failed:", err);
+      }
+    }, intervalMs);
+    // After 30s slow down to 5s
+    setTimeout(() => {
+      if (!statsIntervalRef.current) return;
+      clearInterval(statsIntervalRef.current);
+      statsIntervalRef.current = setInterval(async () => {
+        if (!pcRef.current) return;
+        try {
+          const stats = await pcRef.current.getStats();
+          processStats(stats);
+        } catch (err) {
+          log.error("[STATS] getStats failed:", err);
+        }
+      }, 5000);
+    }, 30000);
+    logWebRTC("STATS_LOOP_STARTED", { initialIntervalMs: intervalMs });
+  };
+
+  const stopStatsLoop = () => {
+    if (statsIntervalRef.current) {
+      clearInterval(statsIntervalRef.current);
+      statsIntervalRef.current = null;
+      logWebRTC("STATS_LOOP_STOPPED", {});
+    }
+  };
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Phase 5 — DTLS diagnostics (CRITICAL for black screen)
+  // Inspects the "transport" stat report which contains dtlsState.
+  // Called every 2s during connection phase, and once on connectionState=connected.
+  // ───────────────────────────────────────────────────────────────────────────
+  const logTransportStats = async (statsMap) => {
+    const stats = statsMap || (pcRef.current ? await pcRef.current.getStats().catch(() => null) : null);
+    if (!stats) return;
+    stats.forEach((report) => {
+      if (report.type === "transport") {
+        logWebRTC("DTLS_STATE", {
+          dtlsState: report.dtlsState,
+          selectedCandidatePairId: report.selectedCandidatePairId,
+          tlsVersion: report.tlsVersion || null,
+          dtlsCipher: report.dtlsCipher || null,
+          srtpCipher: report.srtpCipher || null,
+          iceRole: report.iceRole || null,
+          iceLocalUsernameFragment: report.iceLocalUsernameFragment || null,
+          bytesSent: report.bytesSent || 0,
+          bytesReceived: report.bytesReceived || 0,
+          packetsSent: report.packetsSent || 0,
+          packetsReceived: report.packetsReceived || 0,
+        });
+      }
+    });
+  };
+
+  const processStats = (stats) => {
+    let rtt = null, packetsLost = 0, packetsSent = 0, jitter = null;
+    let bytesSent = 0, selectedPair = null;
+
+    stats.forEach((report) => {
+      // Phase 7 — identify active candidate pair
+      if (
+        report.type === "candidate-pair" &&
+        report.state === "succeeded" &&
+        report.nominated
+      ) {
+        selectedPair = report;
+        if (report.currentRoundTripTime !== undefined) {
+          rtt = report.currentRoundTripTime * 1000;
+        }
+        candidatePairAnalyticsRef.current = {
+          currentRoundTripTime: rtt,
+          availableOutgoingBitrate: report.availableOutgoingBitrate || null,
+          requestsReceived: report.requestsReceived || 0,
+          responsesReceived: report.responsesReceived || 0,
+          totalRoundTripTime: report.totalRoundTripTime !== undefined
+            ? report.totalRoundTripTime * 1000 : null,
+          state: report.state,
+          nominated: report.nominated,
+        };
+      }
+      if (report.type === "outbound-rtp" && report.kind === "video") {
+        packetsSent = report.packetsSent || 0;
+        bytesSent = report.bytesSent || 0;
+      }
+      if (report.type === "remote-inbound-rtp" && report.kind === "video") {
+        if (report.roundTripTime !== undefined) rtt = report.roundTripTime * 1000;
+        if (report.packetsLost !== undefined) packetsLost = report.packetsLost;
+        if (report.jitter !== undefined) jitter = report.jitter * 1000;
+      }
+    });
+
+    if (rtt === null && selectedPair?.currentRoundTripTime !== undefined) {
+      rtt = selectedPair.currentRoundTripTime * 1000;
+    }
+
+    if (selectedPair) {
+      const localCand = stats.get(selectedPair.localCandidateId);
+      const remoteCand = stats.get(selectedPair.remoteCandidateId);
+      if (localCand && remoteCand) {
+        const lType = localCand.candidateType || parseCandidateType(localCand.candidate);
+        const rType = remoteCand.candidateType || parseCandidateType(remoteCand.candidate);
+        const lip = localCand.ip || localCand.address || '';
+        const rip = remoteCand.ip || remoteCand.address || '';
+        selectedCandidatePairRef.current = {
+          localType: lType,
+          remoteType: rType,
+          protocol: localCand.protocol || selectedPair.protocol,
+          localIp: lip,
+          remoteIp: rip,
+        };
+        // Phase 7 — detect TURN usage from active pair
+        if (lType === "relay" || rType === "relay") {
+          if (!turnFallbackOccurredRef.current) {
+            turnFallbackOccurredRef.current = true;
+            log.turn("TURN relay detected in active candidate pair.");
+          }
+        }
+        // Phase 8 — structured log for candidate pair analysis
+        logWebRTC("CANDIDATE_PAIR_ANALYSIS", {
+          localCandidateType: lType || "unknown",
+          remoteCandidateType: rType || "unknown",
+          protocol: localCand.protocol || selectedPair.protocol || "unknown",
+          nominated: selectedPair.nominated,
+          state: selectedPair.state,
+          rtt: rtt,
+          localIp: localCand.ip || localCand.address || null,
+          remoteIp: remoteCand.ip || remoteCand.address || null,
+        });
+        log.stats(
+          `Active pair: Local[${lType}] ${selectedCandidatePairRef.current.localIp}` +
+          ` <-> Remote[${rType}] ${selectedCandidatePairRef.current.remoteIp}`
+        );
+      }
+    }
+
+    if (rtt !== null) {
+      rttHistoryRef.current.push(rtt);
+      if (rttHistoryRef.current.length > 5) rttHistoryRef.current.shift();
+      rttAverageRef.current = rttHistoryRef.current.reduce((a, b) => a + b, 0) / rttHistoryRef.current.length;
+      maxRttRef.current = Math.max(maxRttRef.current, rtt);
+    }
+    if (jitter !== null) jitterAverageRef.current = jitter;
+    if (lastStatsRef.current && packetsSent > lastStatsRef.current.packetsSent) {
+      const ds = packetsSent - lastStatsRef.current.packetsSent;
+      const dl = (packetsLost || 0) - (lastStatsRef.current.packetsLost || 0);
+      if (ds > 0) lossAverageRef.current = Math.max(0, dl / (ds + dl));
+    } else if (packetsSent > 0) {
+      lossAverageRef.current = (packetsLost || 0) / (packetsSent + (packetsLost || 0));
+    }
+    if (lossAverageRef.current > 0) {
+      maxPacketLossRef.current = Math.max(maxPacketLossRef.current, lossAverageRef.current);
+    }
+    lastStatsRef.current = { packetsSent, packetsLost, bytesSent };
+
+    if (callTypeRef.current === "video" || callTypeRef.current === "blind_date") {
+      adjustVideoBitrate();
+    }
+  };
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Phase 8 — Adaptive video bitrate (India-tuned thresholds)
+  // ───────────────────────────────────────────────────────────────────────────
+  const adjustVideoBitrate = async () => {
+    if (!pcRef.current) return;
+    const videoSender = pcRef.current.getSenders().find(s => s.track?.kind === "video");
+    if (!videoSender) return;
+
+    const rtt = rttAverageRef.current;
+    const loss = lossAverageRef.current;
+    let targetBitrate;
+
+    if (rtt > 600 || loss > 0.15) targetBitrate = 150 * 1000;
+    else if (rtt > 400 || loss > 0.10) targetBitrate = 250 * 1000;
+    else if (rtt > 250 || loss > 0.05) targetBitrate = 400 * 1000;
+    else if (rtt < 150 && loss < 0.02) targetBitrate = Math.min(600 * 1000, currentBitrateRef.current + 50 * 1000);
+    else targetBitrate = Math.min(600 * 1000, currentBitrateRef.current);
+
+    if (targetBitrate === currentBitrateRef.current) return;
+
+    try {
+      const params = videoSender.getParameters();
+      if (params.encodings?.length > 0) {
+        params.encodings.forEach((enc) => {
+          if (enc.rid === "low") { enc.active = true; enc.maxBitrate = 120000; }
+          else if (enc.rid === "mid") { enc.active = targetBitrate > 200000; enc.maxBitrate = Math.min(350000, targetBitrate); }
+          else if (enc.rid === "high") { enc.active = targetBitrate > 400000; enc.maxBitrate = targetBitrate; }
+          else { enc.maxBitrate = targetBitrate; }
+        });
+        await videoSender.setParameters(params);
+        currentBitrateRef.current = targetBitrate;
+        bitrateHistoryRef.current.push(targetBitrate / 1000);
+        log.stats(`Bitrate → ${targetBitrate / 1000}kbps  RTT=${Math.round(rtt)}ms loss=${Math.round(loss * 100)}%`);
+      }
+    } catch (err) {
+      log.error("[Bitrate] setParameters failed:", err);
+    }
+  };
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Phase 7 — Metrics submission
+  // ───────────────────────────────────────────────────────────────────────────
+  const submitCallMetrics = async () => {
+    if (!callIdRef.current || metricsSubmittedRef.current) return;
+    metricsSubmittedRef.current = true;
+
+    const establishmentTime = connectionEndTimeRef.current > 0 && connectionStartTimeRef.current > 0
+      ? (connectionEndTimeRef.current - connectionStartTimeRef.current) / 1000
+      : null;
+    const gatheringTime = iceGatheringEndTimeRef.current > 0 && iceGatheringStartTimeRef.current > 0
+      ? (iceGatheringEndTimeRef.current - iceGatheringStartTimeRef.current) / 1000
+      : null;
+    const avgBitrate = bitrateHistoryRef.current.length > 0
+      ? bitrateHistoryRef.current.reduce((a, b) => a + b, 0) / bitrateHistoryRef.current.length
+      : null;
+    const route = selectedCandidatePairRef.current
+      ? getRouteClassification(
+        selectedCandidatePairRef.current.localType,
+        selectedCandidatePairRef.current.remoteType,
+      )
+      : "unknown";
+
+    // Phase 7 — full analytics payload
+    const payload = {
+      call_session_id: callIdRef.current,
+      connection_establishment_time: establishmentTime,
+      ice_gathering_time: gatheringTime,
+      ice_completion_time: gatheringTime,
+      local_candidate_types: localCandidateTypesRef.current,
+      remote_candidate_types: remoteCandidateTypesRef.current,
+      selected_local_candidate_type: selectedCandidatePairRef.current?.localType || null,
+      selected_remote_candidate_type: selectedCandidatePairRef.current?.remoteType || null,
+      turn_fallback_occurrence: turnFallbackOccurredRef.current,
+      average_rtt: rttAverageRef.current > 0 ? rttAverageRef.current : null,
+      max_rtt: maxRttRef.current > 0 ? maxRttRef.current : null,
+      average_packet_loss: lossAverageRef.current,
+      average_jitter: jitterAverageRef.current > 0 ? jitterAverageRef.current : null,
+      average_bitrate_kbps: avgBitrate,
+      recovery_attempts: recoveryAttemptsRef.current,
+      connection_type: route,
+      connection_establishment_ms: establishmentTime ? establishmentTime * 1000 : null,
+      max_packet_loss: maxPacketLossRef.current,
+      turn_fallback_count: turnFallbackOccurredRef.current ? 1 : 0,
+      // Extended Phase 7 fields
+      fallback_used: turnEscalatedRef.current,
+      ice_connected_at_ms: iceConnectedTimeRef.current > 0
+        ? iceConnectedTimeRef.current - callStartTimeRef.current : null,
+      first_media_received_at_ms: firstMediaReceivedTimeRef.current > 0
+        ? firstMediaReceivedTimeRef.current - callStartTimeRef.current : null,
+      offer_to_answer_ms: answerReceivedTimeRef.current > 0 && offerCreatedTimeRef.current > 0
+        ? answerReceivedTimeRef.current - offerCreatedTimeRef.current : null,
+    };
+
+    log.stats("Submitting metrics:", payload);
+    try {
+      await callAPI.submitMetrics(payload);
+      log.stats("Metrics submitted successfully.");
+    } catch (err) {
+      log.warn("Metrics submission failed:", err);
+    }
+  };
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // ───────────────────────────────────────────────────────────────────────────
+  // Safe ICE restart (ONLY fallback mechanism)
+  // ───────────────────────────────────────────────────────────────────────────
+  const restartIceClean = async () => {
+    if (!pcRef.current) return;
+
+    const now = Date.now();
+    if (now - lastIceRestartTimeRef.current < ICE_RESTART_COOLDOWN) {
+      log.restart("ICE restart blocked by cooldown guard.");
+      return;
+    }
+    lastIceRestartTimeRef.current = now;
+
+    recoveryAttemptsRef.current += 1;
+    log.restart(`ICE restart attempt ${recoveryAttemptsRef.current}/${MAX_RECOVERY_CYCLES}...`);
+
+    if (recoveryAttemptsRef.current > MAX_RECOVERY_CYCLES) {
+      log.error("Max recovery cycles exceeded. Ending call.");
+      transitionRTCState("FAILED");
+      setCallErrorMessage("Connection lost permanently.");
+      cleanupCall();
+      return;
+    }
+
+    try {
+      if (isInitiatorRef.current) {
+        const pc = pcRef.current;
+        if (pc) {
+          const offer = await pc.createOffer({ iceRestart: true });
+          await pc.setLocalDescription(offer);
+          sendSignaling({ action: "offer", sdp: offer.sdp });
+          log.restart("ICE restart offer sent.");
+        }
+      } else {
+        log.restart("Non-initiator waiting for remote ICE restart offer.");
+      }
+    } catch (err) {
+      log.error("ICE restart failed:", err);
+    }
+  };
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Phase 2+4 — Connection state listeners + full telemetry
+  // Every state machine transition is logged with logWebRTC(stage, data)
+  // ───────────────────────────────────────────────────────────────────────────
+  const setupConnectionListeners = (pc, isInitiator) => {
+    pc.onsignalingstatechange = () => {
+      trace("SDP", "signaling state changed", { signalingState: pc.signalingState });
+      logWebRTC("SIGNALING_STATE", { state: pc.signalingState });
+      if (pc.signalingState === "stable") {
+        transitionRTCState("STABLE");
+        if (negotiationQueuedRef.current && !isNegotiatingRef.current && isInitiatorRef.current) {
+          negotiationQueuedRef.current = false;
+          createAndSendOffer({}, "queued_negotiation");
+        }
+      }
+    };
+
+    pc.onnegotiationneeded = () => {
+      trace("SDP", "onnegotiationneeded", {
+        isNegotiating: isNegotiatingRef.current,
+        signalingState: pc.signalingState,
+        initialNegotiationStarted: initialNegotiationStartedRef.current,
+      });
+      if (!isInitiatorRef.current) return;
+      if (isNegotiatingRef.current || pc.signalingState !== "stable") {
+        // Only queue a follow-up renegotiation if the INITIAL negotiation is
+        // already underway. If this fires during first transceiver / data-channel
+        // setup (initialNegotiationStartedRef still false), the explicit
+        // createAndSendOffer call handles everything — queuing here would cause
+        // the initiator to send a second, unnecessary offer right after the first
+        // answer, which races with the ontrack wiring and causes a one-sided
+        // black screen on the caller.
+        if (initialNegotiationStartedRef.current) {
+          negotiationQueuedRef.current = true;
+        }
+        return;
+      }
+      if (initialNegotiationStartedRef.current) {
+        createAndSendOffer({}, "negotiationneeded");
+      }
+    };
+
+    // ── ICE gathering state (Phase 2) ──
+    pc.onicegatheringstatechange = () => {
+      const state = pc.iceGatheringState;
+      const elapsedMs = Date.now() - connectionStartTimeRef.current;
+      logWebRTC("ICE_GATHERING_STATE", {
+        state,
+        elapsedMs,
+        hostCount: candidateCountsRef.current.host,
+        srflxCount: candidateCountsRef.current.srflx,
+        relayCount: candidateCountsRef.current.relay,
+      });
+      if (state === "gathering") {
+        transitionRTCState("GATHERING_CANDIDATES");
+        if (iceGatheringStartTimeRef.current === 0) {
+          iceGatheringStartTimeRef.current = Date.now();
+        }
+      }
+      if (state === "complete") {
+        iceGatheringEndTimeRef.current = Date.now();
+        const gatheringMs = iceGatheringEndTimeRef.current - iceGatheringStartTimeRef.current;
+        logWebRTC("ICE_GATHERING_COMPLETE", {
+          gatheringMs,
+          totalCandidates:
+            candidateCountsRef.current.host +
+            candidateCountsRef.current.srflx +
+            candidateCountsRef.current.relay,
+          breakdown: { ...candidateCountsRef.current },
+        });
+      }
+    };
+
+    // ── ICE connection state (Phase 2) ──
+    pc.oniceconnectionstatechange = () => {
+      const state = pc.iceConnectionState;
+      const elapsedMs = Date.now() - connectionStartTimeRef.current;
+      trace("ICE", "state changed", { state, elapsedMs });
+      logWebRTC("ICE_CONNECTION_STATE", { state, elapsedMs });
+      setDebugIceState(state);
+
+      switch (state) {
+        case "checking":
+          transitionRTCState("CHECKING", { iceState: state });
+          break;
+
+        case "connected":
+        case "completed":
+          transitionRTCState("CONNECTED", { iceState: state });
+          if (iceConnectedTimeRef.current === 0) {
+            iceConnectedTimeRef.current = Date.now();
+            const iceConnectMs = iceConnectedTimeRef.current - callStartTimeRef.current;
+            logWebRTC("ICE_CONNECTED", { iceConnectMs, state });
+            notifyMediaConnected();
+          }
+          if (connectionEndTimeRef.current === 0) connectionEndTimeRef.current = Date.now();
+          setIsReconnecting(false);
+          setCallErrorMessage(null);
+          recoveryAttemptsRef.current = 0;
+          isRecoveringRef.current = false;
+          if (p2pTimeoutRef.current) { clearTimeout(p2pTimeoutRef.current); p2pTimeoutRef.current = null; }
+          if (disconnectTimerRef.current) { clearTimeout(disconnectTimerRef.current); disconnectTimerRef.current = null; }
+          startStatsLoop();
+
+          // ── Receiver-track recovery (CALLER BLACK SCREEN FIX) ────────────────
+          setTimeout(() => {
+            const activePc = pcRef.current;
+            if (!activePc) return;
+            if (!remoteStreamRef.current) remoteStreamRef.current = new MediaStream();
+            const stream = remoteStreamRef.current;
+            let added = 0;
+            for (const receiver of activePc.getReceivers()) {
+              const { track } = receiver;
+              if (!track || track.readyState !== "live") continue;
+              if (!stream.getTracks().find(t => t.id === track.id)) {
+                stream.addTrack(track);
+                added++;
+              }
+            }
+            if (added > 0 || stream.getTracks().length > 0) {
+              const vid = remoteVideoRef.current;
+              const aud = remoteAudioRef.current;
+              if (vid && (vid.srcObject !== stream || added > 0)) {
+                vid.srcObject = stream;
+                vid.play().catch(() => { });
+              }
+              if (aud && (aud.srcObject !== stream || added > 0)) {
+                aud.srcObject = stream;
+                aud.play().catch(() => { });
+              }
+              if (added > 0) {
+                logWebRTC("RECEIVER_TRACK_RECOVERY", {
+                  tracksAdded: added,
+                  totalTracks: stream.getTracks().length,
+                  kinds: stream.getTracks().map(t => t.kind),
+                });
+                if (firstMediaReceivedTimeRef.current === 0) {
+                  firstMediaReceivedTimeRef.current = Date.now();
+                }
+              }
+            }
+          }, 1500);
+          break;
+
+        case "disconnected":
+          transitionRTCState("RECONNECTING", { iceState: state });
+          logWebRTC("ICE_DISCONNECTED", { graceMs: DISCONNECT_GRACE_MS });
+          setIsReconnecting(true);
+          if (disconnectTimerRef.current) clearTimeout(disconnectTimerRef.current);
+          disconnectTimerRef.current = setTimeout(async () => {
+            if (!pcRef.current) return;
+            const currentState = pcRef.current.iceConnectionState;
+            if (currentState === "disconnected" || currentState === "failed") {
+              logWebRTC("ICE_GRACE_EXPIRED", { currentState });
+              await restartIceClean();
+            } else {
+              logWebRTC("ICE_SELF_RECOVERED", { currentState });
+              setIsReconnecting(false);
+            }
+          }, DISCONNECT_GRACE_MS);
+          break;
+
+        case "failed":
+          transitionRTCState("RECONNECTING", { iceState: state });
+          logWebRTC("ICE_FAILED", { elapsedMs });
+          setCallErrorMessage("Connection interrupted. Recovering...");
+          if (disconnectTimerRef.current) { clearTimeout(disconnectTimerRef.current); disconnectTimerRef.current = null; }
+          restartIceClean();
+          break;
+
+        case "closed":
+          transitionRTCState("IDLE", { iceState: state });
+          logWebRTC("ICE_CLOSED", { elapsedMs });
+          break;
+
+        default:
+          break;
+      }
+    };
+
+    // ── Overall connection state / DTLS (Phase 5) ──
+    pc.onconnectionstatechange = () => {
+      const state = pc.connectionState;
+      const elapsedMs = Date.now() - connectionStartTimeRef.current;
+      logWebRTC("CONNECTION_STATE", { state, elapsedMs });
+      setDebugConnectionState(state);
+
+      if (state === "connected") {
+        logWebRTC("DTLS_CONNECTED", { elapsedMs });
+        setIsReconnecting(false);
+        recoveryAttemptsRef.current = 0;
+        // Immediately capture DTLS stats once connected
+        logTransportStats();
+      }
+      if (state === "failed") {
+        logWebRTC("DTLS_FAILED", { elapsedMs });
+        transitionRTCState("RECONNECTING", { connectionState: state });
+        setCallErrorMessage("Connection failed. Recovering...");
+        restartIceClean();
+      }
+    };
+  };
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Phase 3+10 — Trickle ICE handler
+  // SEND IMMEDIATELY on every candidate — NO queueing, NO batching.
+  // logWebRTC("ICE_CANDIDATE_LOCAL_SENT") is the audit trail.
+  // ───────────────────────────────────────────────────────────────────────────
+  const setupIceCandidateHandler = (pc) => {
+    pc.onicecandidate = (event) => {
+      if (event.candidate) {
+        // Phase 3: send immediately — NEVER wait for gatheringState === "complete"
+        const type = parseCandidateType(event.candidate.candidate);
+        if (type) {
+          candidateCountsRef.current[type] = (candidateCountsRef.current[type] || 0) + 1;
+          localCandidateTypesRef.current[type] = (localCandidateTypesRef.current[type] || 0) + 1;
+        }
+        // Phase 10 — direct send, logged before sendSignaling to prove no buffering
+        logWebRTC("ICE_CANDIDATE_LOCAL_SENT", {
+          type: type || "unknown",
+          candidate: event.candidate.candidate?.substring(0, 80),
+          sdpMid: event.candidate.sdpMid,
+          totalSent: (candidateCountsRef.current.host || 0) +
+            (candidateCountsRef.current.srflx || 0) +
+            (candidateCountsRef.current.relay || 0),
+        });
+        sendSignaling({ action: "ice_candidate", candidate: event.candidate });
+      } else {
+        logWebRTC("ICE_GATHERING_NULL_CANDIDATE", {
+          meaning: "local gathering complete",
+          breakdown: { ...candidateCountsRef.current },
+        });
+        iceGatheringEndTimeRef.current = iceGatheringEndTimeRef.current || Date.now();
+      }
+    };
+  };
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Phase 6 — Remote track handling (BLACK SCREEN ROOT CAUSE FIX)
+  // BUG: old code only set srcObject when isNewStream===true.
+  // FIX: re-assign srcObject on EVERY track so the video element is always wired,
+  //      regardless of arrival order (audio-first vs video-first).
+  // ───────────────────────────────────────────────────────────────────────────
+  const setupTrackHandler = (pc) => {
+    // Always attach incoming tracks to remoteVideoRef.
+    //
+    // ROOT CAUSE FIX: Never rely solely on event.streams[0].
+    // When simulcast sendEncodings (rid) is used on the sender side, some
+    // browser versions deliver ontrack with event.streams = [] even though
+    // the track is fully decoded. Symptoms: WebRTC internals show
+    // inbound-rtp with frameHeight>0, but video element srcObject is never
+    // set → one-sided black screen.
+    //
+    // Fix: maintain a persistent remoteStreamRef. On every ontrack event,
+    // add the arriving track to that stream (idempotent), then always wire
+    // remoteVideoRef.srcObject to it — regardless of event.streams.
+    pc.ontrack = (event) => {
+      const eventStream = event.streams && event.streams[0];
+
+      // Record first media arrival for diagnostics
+      if (firstMediaReceivedTimeRef.current === 0) {
+        firstMediaReceivedTimeRef.current = Date.now();
+        logWebRTC("FIRST_MEDIA_RECEIVED", {
+          kind: event.track?.kind,
+          elapsedMs: Date.now() - callStartTimeRef.current,
+        });
+      }
+
+      // Always ensure we have a persistent remote stream object
+      if (!remoteStreamRef.current) {
+        remoteStreamRef.current = new MediaStream();
+      }
+
+      // If this track is not already in our stream, add it
+      const remoteStream = remoteStreamRef.current;
+      let trackAdded = false;
+      if (event.track && !remoteStream.getTracks().find(t => t.id === event.track.id)) {
+        remoteStream.addTrack(event.track);
+        trackAdded = true;
+      }
+
+      logWebRTC("REMOTE_TRACK_EVENT", {
+        streams: !!eventStream,
+        streamId: eventStream?.id || remoteStream.id,
+        kind: event.track?.kind,
+        fallback: !eventStream,
+        totalTracks: remoteStream.getTracks().length,
+      });
+
+      const video = remoteVideoRef.current;
+      if (video) {
+        // Wire srcObject — force re-assign if a new track was added to the stream
+        if (video.srcObject !== remoteStream || trackAdded) {
+          video.srcObject = remoteStream;
+          video.autoplay = true;
+          video.playsInline = true;
+        }
+        video.play().catch((err) => {
+          logWebRTC("VIDEO_PLAY_FAILED", { error: err?.message });
+        });
+
+        // Rendering diagnostics 800ms after each track arrives
+        setTimeout(async () => {
+          if (!pcRef.current) return;
+          try {
+            const stats = await pcRef.current.getStats();
+            let inboundVideo = null;
+            stats.forEach((report) => {
+              if (report.type === "inbound-rtp" && report.kind === "video") {
+                inboundVideo = report;
+              }
+            });
+            logWebRTC("INBOUND_VIDEO_STATS", {
+              srcObjectSet: !!video.srcObject,
+              readyState: video.readyState,
+              videoWidth: video.videoWidth,
+              videoHeight: video.videoHeight,
+              trackCount: remoteStream.getTracks().length,
+              inboundVideo: inboundVideo ? {
+                framesDecoded: inboundVideo.framesDecoded || inboundVideo.framesReceived || 0,
+                packetsLost: inboundVideo.packetsLost || 0,
+                jitter: inboundVideo.jitter || null,
+              } : null,
+            });
+          } catch (err) {
+            log.error("getStats after ontrack failed:", err);
+          }
+        }, 800);
+      }
+
+      const audio = remoteAudioRef.current;
+      if (audio) {
+        if (audio.srcObject !== remoteStream || trackAdded) {
+          audio.srcObject = remoteStream;
+          audio.autoplay = true;
+          audio.playsInline = true;
+        }
+        audio.play().catch(() => { });
+      }
+    };
+  };
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Signaling queue & handlers
+  // ───────────────────────────────────────────────────────────────────────────
+  const flushIceCandidates = async () => {
+    if (!pcRef.current) return;
+    if (!pcRef.current.remoteDescription) return;
+    const queue = [...pendingIceCandidates.current];
+    pendingIceCandidates.current = [];
+    trace("ICE", "candidate queue flush", { count: queue.length });
+    logWebRTC("ICE_CANDIDATE_DRAIN_START", { count: queue.length });
+    for (const cand of queue) {
+      try {
+        const type = parseCandidateType(cand.candidate);
+        logWebRTC("ICE_CANDIDATE_REMOTE_APPLIED", {
+          type: type || "unknown",
+          candidate: cand.candidate?.substring(0, 80),
+          sdpMid: cand.sdpMid,
+          drained: true,
+        });
+        await pcRef.current.addIceCandidate(new RTCIceCandidate(cand));
+      } catch (err) {
+        log.error("Error adding queued candidate:", err);
+      }
+    }
+  };
+
+  const handleSignalingMessage = async (msg) => {
+    const type = msg.type || msg.action;
+    if (!pcRef.current) {
+      // PC not yet initialised (callee receives offer before setupWebRTCPeer runs).
+      // Queue the message so it is replayed once the PC is ready, instead of dropping it.
+      if (type === "offer" || type === "answer" || type === "ice_candidate") {
+        log.warn(`handleSignalingMessage: pcRef null, re-queuing "${type}" for later replay.`);
+        signalingQueueRef.current.push(msg);
+      } else {
+        log.warn(`Cannot handle signaling "${type}": pcRef is null`);
+      }
+      return;
+    }
+    switch (type) {
+      case "offer":
+        await runPeerOperation("handleRemoteOffer", async () => {
+          logWebRTC("SDP_OFFER_RECEIVED", { sdpType: "offer" });
+          const pc = pcRef.current;
+          const sdpKey = remoteSdpKey("offer", msg.sdp);
+          if (appliedRemoteSdpKeysRef.current.has(sdpKey)) {
+            logWebRTC("SDP_OFFER_IGNORED", { reason: "duplicate_remote_offer" });
+            return;
+          }
+          const offerCollision =
+            isNegotiatingRef.current || pc.signalingState !== "stable";
+
+          if (offerCollision) {
+            logWebRTC("NEGOTIATION_COLLISION", {
+              localRole: isInitiatorRef.current ? "initiator" : "receiver",
+              signalingState: pc.signalingState,
+            });
+
+            if (isInitiatorRef.current) {
+              logWebRTC("SDP_OFFER_IGNORED", { reason: "collision_initiator" });
+              return;
+            }
+
+            try {
+              await pc.setLocalDescription({ type: "rollback" });
+              logWebRTC("SDP_LOCAL_ROLLBACK", {});
+            } catch (rollbackErr) {
+              log.warn("Rollback before collided offer failed:", rollbackErr);
+            }
+          }
+
+          isNegotiatingRef.current = true;
+          remoteDescriptionAppliedRef.current = false;
+          transitionRTCState("PREPARING_MEDIA", { remoteSdp: "offer" });
+          await pc.setRemoteDescription(
+            new RTCSessionDescription({ type: "offer", sdp: msg.sdp })
+          );
+          appliedRemoteSdpKeysRef.current.add(sdpKey);
+          logWebRTC("SDP_REMOTE_DESC_SET", { sdpType: "offer" });
+          remoteDescriptionAppliedRef.current = true;
+          await flushIceCandidates();
+          await syncSendersWithTracks(pc);
+
+          const answer = await pc.createAnswer();
+          logWebRTC("SDP_ANSWER_CREATED", { sdpType: "answer" });
+          await pc.setLocalDescription(answer);
+          logWebRTC("SDP_LOCAL_DESC_SET", { sdpType: "answer" });
+          sendSignaling({ action: "answer", sdp: answer.sdp });
+          logWebRTC("SDP_ANSWER_SENT", {});
+          isNegotiatingRef.current = false;
+        }).catch((err) => {
+          isNegotiatingRef.current = false;
+          log.error("Error handling offer:", err);
+        });
+        break;
+
+      case "answer":
+        await runPeerOperation("handleRemoteAnswer", async () => {
+          if (pcRef.current.signalingState !== "have-local-offer") {
+            logWebRTC("SDP_ANSWER_IGNORED", {
+              reason: "no_local_offer",
+              signalingState: pcRef.current.signalingState,
+            });
+            return;
+          }
+          const sdpKey = remoteSdpKey("answer", msg.sdp);
+          if (appliedRemoteSdpKeysRef.current.has(sdpKey)) {
+            logWebRTC("SDP_ANSWER_IGNORED", { reason: "duplicate_remote_answer" });
+            return;
+          }
+          logWebRTC("SDP_ANSWER_RECEIVED", {
+            offerToAnswerMs: Date.now() - offerCreatedTimeRef.current,
+          });
+          isNegotiatingRef.current = true;
+          answerReceivedTimeRef.current = Date.now();
+          remoteDescriptionAppliedRef.current = false;
+          await pcRef.current.setRemoteDescription(
+            new RTCSessionDescription({ type: "answer", sdp: msg.sdp })
+          );
+          appliedRemoteSdpKeysRef.current.add(sdpKey);
+          logWebRTC("SDP_REMOTE_DESC_SET", { sdpType: "answer" });
+          remoteDescriptionAppliedRef.current = true;
+          await flushIceCandidates();
+          transitionRTCState("STABLE", { remoteSdp: "answer" });
+          isNegotiatingRef.current = false;
+        }).catch((err) => {
+          isNegotiatingRef.current = false;
+          log.error("Error handling answer:", err);
+        });
+        break;
+
+      case "ice_candidate":
+        if (msg.candidate) {
+          const candStr = msg.candidate.candidate;
+          const candidateKey = [
+            candStr,
+            msg.candidate.sdpMid ?? "",
+            msg.candidate.sdpMLineIndex ?? "",
+            msg.candidate.usernameFragment ?? "",
+          ].join("|");
+          if (processedRemoteCandidatesRef.current.has(candidateKey)) {
+            log.ice("Ignoring duplicate remote candidate.");
+            break;
+          }
+          processedRemoteCandidatesRef.current.add(candidateKey);
+
+          const type = parseCandidateType(candStr);
+          if (type) {
+            remoteCandidateTypesRef.current[type] = (remoteCandidateTypesRef.current[type] || 0) + 1;
+          }
+
+          if (pcRef.current && remoteDescriptionAppliedRef.current) {
+            try {
+              trace("ICE", "candidate applied", { type: type || "unknown", sdpMid: msg.candidate.sdpMid });
+              logWebRTC("ICE_CANDIDATE_REMOTE_APPLIED", {
+                type: type || "unknown",
+                candidate: candStr.substring(0, 80),
+                sdpMid: msg.candidate.sdpMid,
+                drained: false,
+              });
+              await pcRef.current.addIceCandidate(new RTCIceCandidate(msg.candidate));
+            } catch (err) {
+              log.error("addIceCandidate failed:", err);
+            }
+          } else {
+            trace("ICE", "candidate queued", { type: type || "unknown", sdpMid: msg.candidate.sdpMid });
+            logWebRTC("ICE_CANDIDATE_REMOTE_QUEUED", {
+              type: type || "unknown",
+              candidate: candStr.substring(0, 80),
+              sdpMid: msg.candidate.sdpMid,
+            });
+            pendingIceCandidates.current.push(msg.candidate);
+          }
+        } else {
+          logWebRTC("ICE_CANDIDATE_REMOTE_NULL", { meaning: "remote end-of-candidates" });
+        }
+        break;
+
+      default:
+        break;
+    }
+  };
+
+  const enqueueSignalingMessage = (msg) => {
+    log.signaling(`Enqueue: ${msg.type || msg.action}`);
+    signalingQueueRef.current.push(msg);
+    processSignalingQueue();
+  };
+
+  const processSignalingQueue = async () => {
+    if (isProcessingQueueRef.current || !pcRef.current || !webrtcPeerReadyRef.current) return;
+    isProcessingQueueRef.current = true;
+    while (signalingQueueRef.current.length > 0 && pcRef.current) {
+      const msg = signalingQueueRef.current.shift();
+      try { await handleSignalingMessage(msg); }
+      catch (err) { log.error("Queue processing error:", err); }
+    }
+    isProcessingQueueRef.current = false;
+  };
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // WebSocket signaling
+  // ───────────────────────────────────────────────────────────────────────────
+  async function handleSocketMessage(e) {
+    const msg = JSON.parse(e.data);
+    const type = msg.type || msg.action;
+
+    switch (type) {
+      case "call.incoming":
+        if (callStateRef.current !== "idle") {
+          log.warn("Ignoring incoming call. State is not idle:", callStateRef.current);
+          break;
+        }
+        setCallId(msg.call_id);
+        callIdRef.current = msg.call_id;
+        setCallType(msg.call_type);
+        setCallerEmail(msg.caller_email || "Someone");
+        setCallState("incoming");
+        break;
+      case "call.accepted":
+        if (msg.call_id) {
+          setCallId(msg.call_id);
+          callIdRef.current = msg.call_id;
+        }
+        setCallState("active");
+        setIsMediaConnected(false);
+        break;
+      case "call.connected":
+        setIsMediaConnected(true);
+        setDuration(0);
+        break;
+      case "quota_warning":
+        setQuotaWarning({
+          remainingSeconds: msg.remaining_seconds,
+          remainingMinutes: msg.remaining_minutes,
+          message: msg.message,
+        });
+        break;
+      case "offer":
+      case "answer":
+      case "ice_candidate":
+        enqueueSignalingMessage(msg);
+        break;
+      case "camera_request":
+        alert("The other user requested you to turn your camera on!");
+        break;
+      case "camera_unlocked":
+        setCameraUnlocked(true);
+        alert("📸 5 minutes reached! Cameras are now unlocked for your Blind Date!");
+        break;
+      case "chat_saved":
+        setChatSaved(true);
+        alert("🎉 Match saved! Both users voted to keep contact.");
+        break;
+      case "call.ended":
+        cleanupCall();
+        setTimeout(() => alert(`Call ended. Reason: ${msg.reason || "disconnect"}. Duration: ${msg.duration || 0}s`), 100);
+        break;
+      case "error":
+        cleanupCall();
+        setTimeout(() => alert(`Calling Error: ${msg.message}`), 100);
+        break;
+      default:
+        break;
+    }
+  }
+
+  // Keep handlers stable in closures
+  useEffect(() => {
+    handleSocketMessageRef.current = handleSocketMessage;
+    cleanupCallRef.current = cleanupCall;
+  });
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // WebSocket connection with reconnect logic
+  // ───────────────────────────────────────────────────────────────────────────
+  useEffect(() => {
+    let ws = null;
+    let reconnectTimeout = null;
+    let heartbeatInterval = null;
+    let reconnectAttempts = 0;
+
+    const connect = async () => {
+      if (ws) { try { ws.onclose = null; ws.close(); } catch { } }
+      try {
+        const res = await authAPI.getWsTicket();
+        if (!res || !res.ticket) throw new Error("No WS ticket");
+
+        ws = new WebSocket(wsURL.call(res.ticket));
+
+        ws.onopen = () => {
+          reconnectAttempts = 0;
+          log.signaling("WebSocket connected.");
+          if (callStateRef.current !== "idle" && callIdRef.current) {
+            ws.send(JSON.stringify({
+              action: "reconnect_sync",
+              call_id: callIdRef.current,
+              call_state: callStateRef.current,
+            }));
+            const iceState = pcRef.current?.iceConnectionState;
+            if (iceState === "connected" || iceState === "completed") {
+              mediaConnectedSentRef.current = false;
+              notifyMediaConnected();
+            }
+          }
+          flushOutgoingSignalingQueue();
+        };
+
+        ws.onmessage = (e) => handleSocketMessageRef.current(e);
+        ws.onclose = () => scheduleReconnect();
+        ws.onerror = (err) => { log.error("WS error:", err); ws.close(); };
+
+        socketRef.current = ws;
+
+        if (heartbeatInterval) clearInterval(heartbeatInterval);
+        heartbeatInterval = setInterval(() => {
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ action: "heartbeat" }));
+          }
+        }, 2000);
+      } catch (err) {
+        log.error("WS connection failed:", err.message || err);
+        cleanupCallRef.current();
+        scheduleReconnect();
+      }
+    };
+
+    const scheduleReconnect = () => {
+      if (reconnectTimeout) clearTimeout(reconnectTimeout);
+      const delay = Math.min(2000 * Math.pow(2, reconnectAttempts), 30000);
+      reconnectAttempts++;
+      log.signaling(`WS reconnect in ${delay / 1000}s (attempt ${reconnectAttempts})`);
+      reconnectTimeout = setTimeout(connect, delay);
+    };
+
+    connect();
+
+    return () => {
+      cleanupCallRef.current();
+      if (ws) { ws.onclose = null; ws.close(); }
+      if (reconnectTimeout) clearTimeout(reconnectTimeout);
+      if (heartbeatInterval) clearInterval(heartbeatInterval);
+    };
+  }, []);
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Expose global window hooks for external call triggers
+  // ───────────────────────────────────────────────────────────────────────────
+  useEffect(() => {
+    window.startCall = (targetUserId, type = "voice") => initiateCall(targetUserId, type);
+    window.startBlindDateCall = (sessionId, otherUserId) => joinBlindDateCall(sessionId, otherUserId);
+    return () => { window.startCall = null; window.startBlindDateCall = null; };
+  }, [user]);
+
+  // Duration timer — only counts connected talktime, not ringing
+  useEffect(() => {
+    if (callState === "active" && isMediaConnected) {
+      timerRef.current = setInterval(() => setDuration(d => d + 1), 1000);
+    } else {
+      clearInterval(timerRef.current);
+    }
+    return () => clearInterval(timerRef.current);
+  }, [callState, isMediaConnected]);
+
+  // Trigger WebRTC setup when active.
+  // CRITICAL: force-sync callTypeRef.current BEFORE setupWebRTCPeer reads it.
+  // Without this, the useEffect that syncs callTypeRef (line 60) may not have
+  // flushed yet when setupWebRTCPeer runs, causing the video transceiver to be
+  // created with direction="inactive" even for video calls — ICE/DTLS succeed
+  // but ontrack never fires because the m=video line is negotiated as inactive.
+  //
+  // Guard: webrtcSetupRunningRef prevents re-invoking setupWebRTCPeer when callType
+  // is in the dep array. Without it, any re-render with callState==="active" and a
+  // changed callType (e.g. from a race on first render) would destroy the live PC.
+  useEffect(() => {
+    if (callState === "active") {
+      if (webrtcSetupRunningRef.current) {
+        // Already running for this call session — just keep the ref in sync.
+        callTypeRef.current = callType;
+        return;
+      }
+      callTypeRef.current = callType; // force-sync ahead of async useEffect flush
+      webrtcSetupRunningRef.current = true;
+      setupWebRTCPeer(isInitiatorRef.current).finally(() => {
+        // Leave the flag set until cleanupCall resets it (via callState -> idle).
+      });
+    } else {
+      // Any non-active state (idle, incoming, ringing) clears the guard.
+      webrtcSetupRunningRef.current = false;
+    }
+  }, [callState, callType]);
+
+
+
+
+
+  useEffect(() => {
+    if (callState !== "active") return;
+    
+    // Aggressive rewiring interval to guarantee srcObject is set
+    // even if React delays rendering the video element or re-renders it.
+    const interval = setInterval(() => {
+      if (!remoteStreamRef.current) return;
+      const stream = remoteStreamRef.current;
+      const vid = remoteVideoRef.current;
+      const aud = remoteAudioRef.current;
+
+      if (vid && vid.srcObject !== stream) {
+        vid.srcObject = stream;
+        vid.play().catch(() => { });
+        log.webrtc("Aggressive rewire: remoteVideoRef.srcObject set");
+      }
+      if (aud && aud.srcObject !== stream) {
+        aud.srcObject = stream;
+        aud.play().catch(() => { });
+        log.webrtc("Aggressive rewire: remoteAudioRef.srcObject set");
+      }
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, [callState]);
+
+
+
+
+
+  // Notification permission
+  useEffect(() => {
+    if ("Notification" in window && Notification.permission === "default") {
+      Notification.requestPermission();
+    }
+  }, []);
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Ringtone (Web Audio API)
+  // ───────────────────────────────────────────────────────────────────────────
+  const startRingtone = () => {
+    if (ringtoneRef.current) return;
+    try {
+      const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+      if (!AudioContextClass) return;
+      const audioCtx = new AudioContextClass();
+      const playPattern = () => {
+        const [o1, o2] = [audioCtx.createOscillator(), audioCtx.createOscillator()];
+        const gain = audioCtx.createGain();
+        o1.frequency.value = 440; o2.frequency.value = 480;
+        o1.connect(gain); o2.connect(gain); gain.connect(audioCtx.destination);
+        gain.gain.setValueAtTime(0, audioCtx.currentTime);
+        gain.gain.linearRampToValueAtTime(0.2, audioCtx.currentTime + 0.1);
+        gain.gain.setValueAtTime(0.2, audioCtx.currentTime + 1.5);
+        gain.gain.linearRampToValueAtTime(0, audioCtx.currentTime + 1.8);
+        o1.start(); o2.start();
+        setTimeout(() => { try { o1.stop(); o2.stop(); o1.disconnect(); o2.disconnect(); gain.disconnect(); } catch { } }, 2000);
+      };
+      playPattern();
+      const interval = setInterval(playPattern, 4000);
+      ringtoneRef.current = { audioCtx, interval };
+    } catch (err) { log.error("Ringtone failed:", err); }
+  };
+
+  const stopRingtone = () => {
+    if (ringtoneRef.current) {
+      clearInterval(ringtoneRef.current.interval);
+      try { ringtoneRef.current.audioCtx.close(); } catch { }
+      ringtoneRef.current = null;
+    }
+  };
+
+  useEffect(() => {
+    if (callState === "incoming") {
+      startRingtone();
+      if ("Notification" in window && Notification.permission === "granted") {
+        new Notification("Incoming Call", {
+          body: `${callerEmail.split("@")[0]} is calling you!`,
+          tag: "incoming-call",
+          requireInteraction: true,
+        });
+      }
+    } else {
+      stopRingtone();
+    }
+    return () => stopRingtone();
+  }, [callState, callerEmail]);
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Main WebRTC setup
+  // Phase 2 — RTCPeerConnection config
+  // Phase 6A — P2P primary attempt with 15s watchdog
+  // ───────────────────────────────────────────────────────────────────────────
+  const setupWebRTCPeer = async (isInitiator) => {
+    webrtcPeerReadyRef.current = false;
+    // Tear down any existing PC
+    if (pcRef.current) { try { pcRef.current.close(); } catch { } pcRef.current = null; }
+
+    // Full state reset (DO NOT clear signalingQueueRef.current here)
+    pendingIceCandidates.current = [];
+    processedRemoteCandidatesRef.current.clear();
+    appliedRemoteSdpKeysRef.current.clear();
+    isProcessingQueueRef.current = false;
+    isNegotiatingRef.current = false;
+    negotiationQueuedRef.current = false;
+    initialNegotiationStartedRef.current = false;
+    negotiationChainRef.current = Promise.resolve();
+    transceiversRef.current = { audio: null, video: null };
+    dataChannelRef.current = null;
+    remoteDescriptionAppliedRef.current = false;
+    turnFallbackOccurredRef.current = false;
+    turnEscalatedRef.current = false;
+    recoveryAttemptsRef.current = 0;
+    isRecoveringRef.current = false;
+    metricsSubmittedRef.current = false;
+    remoteStreamRef.current = null;
+    
+    transitionRTCState("CONNECTING");
+
+    // Phase 4 — timestamp init
+    callStartTimeRef.current = Date.now();
+    offerCreatedTimeRef.current = 0;
+    answerReceivedTimeRef.current = 0;
+    iceConnectedTimeRef.current = 0;
+    firstMediaReceivedTimeRef.current = 0;
+    iceGatheringStartTimeRef.current = 0;
+    iceGatheringEndTimeRef.current = 0;
+    connectionStartTimeRef.current = Date.now();
+    connectionEndTimeRef.current = 0;
+
+    // Quality telemetry reset
+    candidateCountsRef.current = { host: 0, srflx: 0, relay: 0 };
+    localCandidateTypesRef.current = {};
+    remoteCandidateTypesRef.current = {};
+    selectedCandidatePairRef.current = null;
+    rttHistoryRef.current = [];
+    rttAverageRef.current = 0;
+    maxRttRef.current = 0;
+    lossAverageRef.current = 0;
+    maxPacketLossRef.current = 0;
+    jitterAverageRef.current = 0;
+    bitrateHistoryRef.current = [];
+    lastStatsRef.current = null;
+    currentBitrateRef.current = 600 * 1000;
+    lastIceRestartTimeRef.current = 0;
+
+    setIsReconnecting(false);
+
+    try {
+      let dynamicServers = [];
+      try {
+        const res = await callAPI.getIceServers(false, false);
+        if (res && res.iceServers) {
+          dynamicServers = res.iceServers.map(s => {
+            const c = { urls: s.urls };
+            if (s.username) c.username = s.username;
+            if (s.credential) c.credential = s.credential;
+            return c;
+          });
+        }
+      } catch (err) {
+        log.error("Failed to fetch initial ICE servers:", err);
+      }
+
+      const defaultIceServers = [
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:stun1.l.google.com:19302' },
+        { urls: 'stun:stun2.l.google.com:19302' },
+        { urls: 'stun:stun.cloudflare.com:3478' }
+      ];
+
+      const configuration = {
+        iceServers: [...defaultIceServers, ...dynamicServers],
+        iceTransportPolicy: 'all', 
+        iceCandidatePoolSize: 2,
+        bundlePolicy: 'max-bundle',
+        rtcpMuxPolicy: 'require'
+      };
+
+      log.ice(`Initialising RTCPeerConnection with fixed configuration`);
+
+      const pc = new RTCPeerConnection(configuration);
+      pcRef.current = pc;
+      window.pc = pc;
+
+      setupConnectionListeners(pc, isInitiator);
+      setupIceCandidateHandler(pc);
+      setupTrackHandler(pc);
+      if (!isInitiator) setupDataChannel(pc, false);
+
+      // Acquire local media if not already obtained
+      const needsVideo = callTypeRef.current === "video" || callTypeRef.current === "blind_date";
+      if (!localStreamRef.current) {
+        try {
+          // Phase 8 — start with constrained resolution for mobile
+          const constraints = getMediaConstraints(needsVideo);
+          localStreamRef.current = await navigator.mediaDevices.getUserMedia(constraints);
+          log.webrtc(`Local media acquired (video=${needsVideo})`);
+        } catch (mediaErr) {
+          log.warn("getUserMedia failed — using loopback placeholder:", mediaErr);
+          // Safari-safe loopback placeholder
+          const canvas = document.createElement("canvas");
+          canvas.width = 320; canvas.height = 240;
+          canvas.getContext("2d").fillRect(0, 0, 320, 240);
+          const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+          const osc = audioCtx.createOscillator();
+          const dest = osc.connect(audioCtx.createMediaStreamDestination());
+          osc.start();
+          localStreamRef.current = new MediaStream([
+            ...canvas.captureStream(10).getVideoTracks(),
+            ...dest.stream.getAudioTracks(),
+          ]);
+        }
+      }
+
+      if (localVideoRef.current && needsVideo) {
+        localVideoRef.current.srcObject = localStreamRef.current;
+      }
+
+      // Attach tracks, transceivers, and data channel BEFORE creating any offer/answer (Caller only)
+      if (localStreamRef.current && isInitiator) {
+        await syncSendersWithTracks(pc);
+        setupDataChannel(pc, isInitiator);
+        if (debug) console.log("[WEBRTC] Local transceivers, tracks, and data channel initialized.");
+      }
+
+      if (isInitiator) {
+        await createAndSendOffer({}, "initial");
+      }
+
+      webrtcPeerReadyRef.current = true;
+      await processSignalingQueue();
+    } catch (err) {
+      log.error("setupWebRTCPeer fatal error:", err);
+    }
+  };
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Phase 8 — Network change / sleep-wake recovery
+  // ───────────────────────────────────────────────────────────────────────────
+  useEffect(() => {
+    if (callState !== "active") return;
+
+    const handleNetworkEvent = async (force = false) => {
+      if (!pcRef.current) return;
+      const iceState = pcRef.current.iceConnectionState;
+      const connState = pcRef.current.connectionState;
+
+      if (force || ["failed", "disconnected"].includes(iceState) || ["failed", "disconnected"].includes(connState)) {
+        log.restart(`Network event (force=${force}). States: ice=${iceState} conn=${connState}`);
+        await restartIceClean();
+      } else {
+        log.webrtc("Network event — connection healthy, skipping restart.");
+      }
+    };
+
+    // Detect sleep-wake: drift > 7s between 2s ticks
+    let lastTick = Date.now();
+    const driftInterval = setInterval(() => {
+      const now = Date.now();
+      if (now - lastTick > 7000) {
+        log.restart("Sleep-wake detected (timer drift). Triggering recovery check.");
+        handleNetworkEvent(true);
+      }
+      lastTick = now;
+    }, 2000);
+
+    const onOnline = () => handleNetworkEvent(false);
+    const onOffline = () => handleNetworkEvent(false);
+    const onConnChange = () => handleNetworkEvent(false);
+    const onVisible = () => {
+      if (document.visibilityState === "visible") {
+        log.webrtc("Tab visible. Verifying connection...");
+        handleNetworkEvent(false);
+      }
+    };
+
+    window.addEventListener("online", onOnline);
+    window.addEventListener("offline", onOffline);
+    document.addEventListener("visibilitychange", onVisible);
+    if (navigator.connection) navigator.connection.addEventListener("change", onConnChange);
+
+    return () => {
+      clearInterval(driftInterval);
+      window.removeEventListener("online", onOnline);
+      window.removeEventListener("offline", onOffline);
+      document.removeEventListener("visibilitychange", onVisible);
+      if (navigator.connection) navigator.connection.removeEventListener("change", onConnChange);
+    };
+  }, [callState]);
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Call initiation flows
+  // ───────────────────────────────────────────────────────────────────────────
+  const initiateCall = async (targetId, type) => {
+    if (callStateRef.current !== "idle") {
+      log.warn("Cannot initiate call, state is not idle:", callStateRef.current);
+      return;
+    }
+    if (socketRef.current?.readyState !== WebSocket.OPEN) {
+      alert("⚠️ Connection lost. Please wait while we reconnect.");
+      return;
+    }
+    const needsVideo = type === "video" || type === "blind_date";
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia(getMediaConstraints(needsVideo));
+      localStreamRef.current = stream;
+      isInitiatorRef.current = true;
+      setCallType(type);
+      setCallState("ringing");
+      setChatSaved(false);
+      setCameraUnlocked(false);
+      sendSignaling({ action: "initiate", callee_id: targetId, call_type: type });
+    } catch (err) {
+      alert("⚠️ Camera/microphone access required. Check browser settings.");
+      log.error("getUserMedia failed on initiateCall:", err);
+    }
+  };
+
+  const joinBlindDateCall = async (sessionId, otherUserId) => {
+    if (socketRef.current?.readyState !== WebSocket.OPEN) {
+      alert("⚠️ Connection lost. Cannot join Blind Date room.");
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia(getMediaConstraints(true));
+      localStreamRef.current = stream;
+    } catch (err) {
+      alert("⚠️ Camera/microphone access required for Blind Date.");
+      log.error("getUserMedia failed on joinBlindDateCall:", err);
+      return;
+    }
+    setCallId(sessionId);
+    callIdRef.current = sessionId;
+    setCallType("blind_date");
+    setChatSaved(false);
+    setCameraUnlocked(false);
+    sendSignaling({ action: "accept", call_id: sessionId });
+
+    // Deterministic initiator selection (lexicographic UUID comparison)
+    const myId = user?.id || "";
+    isInitiatorRef.current = String(myId).toLowerCase() < String(otherUserId).toLowerCase();
+    log.webrtc(`Blind Date room ${sessionId}. isInitiator=${isInitiatorRef.current}`);
+  };
+
+  const acceptCall = async () => {
+    if (socketRef.current?.readyState !== WebSocket.OPEN) {
+      alert("⚠️ Connection lost. Cannot accept call.");
+      return;
+    }
+    const needsVideo = callType === "video" || callType === "blind_date";
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia(getMediaConstraints(needsVideo));
+      localStreamRef.current = stream;
+      isInitiatorRef.current = false;
+      setCallState("active");
+      setIsMediaConnected(false);
+      sendSignaling({ action: "accept", call_id: callId });
+    } catch (err) {
+      alert("⚠️ Camera/microphone access required to accept the call.");
+      log.error("getUserMedia failed on acceptCall:", err);
+    }
+  };
+
+  const declineOrEndCall = () => {
+    sendSignaling({ action: "end" });
+    cleanupCall();
+  };
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Phase 9 — Full cleanup (memory-leak safe)
+  // ───────────────────────────────────────────────────────────────────────────
+  function cleanupCall() {
+    log.webrtc("cleanupCall() — tearing down session.");
+
+    // Submit metrics before destroying state
+    runFailureClassification();
+    submitCallMetrics();
+
+    // Clear all timers
+    clearAllTimers();
+    stopStatsLoop();
+    clearInterval(timerRef.current);
+
+    // Clear signaling state
+    webrtcPeerReadyRef.current = false;
+    processedRemoteCandidatesRef.current.clear();
+    appliedRemoteSdpKeysRef.current.clear();
+    signalingQueueRef.current = [];
+    isProcessingQueueRef.current = false;
+    pendingIceCandidates.current = [];
+    isNegotiatingRef.current = false;
+    negotiationQueuedRef.current = false;
+    initialNegotiationStartedRef.current = false;
+    transceiversRef.current = { audio: null, video: null };
+    dataChannelRef.current = null;
+    transitionRTCState("IDLE");
+
+    // Clear recovery state
+    isRecoveringRef.current = false;
+    turnEscalatedRef.current = false;
+
+    // Stop local media tracks
+    if (localStreamRef.current) {
+      localStreamRef.current.getTracks().forEach(t => t.stop());
+      localStreamRef.current = null;
+    }
+    remoteStreamRef.current = null;
+
+    // Detach DOM refs
+    if (localVideoRef.current) localVideoRef.current.srcObject = null;
+    if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null;
+    if (remoteAudioRef.current) remoteAudioRef.current.srcObject = null;
+
+    // Close peer connection — remove event handlers first to avoid state callbacks
+    if (pcRef.current) {
+      pcRef.current.oniceconnectionstatechange = null;
+      pcRef.current.onconnectionstatechange = null;
+      pcRef.current.onicegatheringstatechange = null;
+      pcRef.current.onicecandidate = null;
+      pcRef.current.ontrack = null;
+      pcRef.current.onsignalingstatechange = null;
+      pcRef.current.onnegotiationneeded = null;
+      pcRef.current.ondatachannel = null;
+      try { pcRef.current.close(); } catch { }
+      pcRef.current = null;
+    }
+
+    // Reset UI state
+    setCallState("idle");
+    setDuration(0);
+    setIsMediaConnected(false);
+    setQuotaWarning(null);
+    mediaConnectedSentRef.current = false;
+    setMuted(false);
+    setCameraActive(true);
+    setChatSaved(false);
+    setCameraUnlocked(false);
+    setIsReconnecting(false);
+    setDebugIceState("new");
+    setDebugConnectionState("new");
+    setRemoteTrackStatus("Awaiting tracks...");
+    setCallErrorMessage(null);
+
+    stopRingtone();
+    log.webrtc("cleanupCall() complete.");
+  }
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Controls
+  // ───────────────────────────────────────────────────────────────────────────
+  const toggleMute = () => {
+    if (localStreamRef.current) {
+      const track = localStreamRef.current.getAudioTracks()[0];
+      if (track) { track.enabled = !track.enabled; setMuted(!track.enabled); }
+    }
+  };
+
+  const toggleCamera = () => {
+    if (localStreamRef.current) {
+      const track = localStreamRef.current.getVideoTracks()[0];
+      if (track) {
+        track.enabled = !track.enabled;
+        setCameraActive(track.enabled);
+        if (track.enabled) sendSignaling({ action: "camera_on" });
+      }
+    }
+  };
+
+  const saveChatVote = () => sendSignaling({ action: "save_chat" });
+
+  const forcePlayAllVideos = () => {
+    document.querySelectorAll("video").forEach(v => {
+      v.play().then(() => log.webrtc("Force-play succeeded.")).catch(err => log.warn("Force-play failed:", err));
+    });
+  };
+
+  const formatDuration = (secs) => {
+    const m = Math.floor(secs / 60), s = secs % 60;
+    return `${m}:${s < 10 ? "0" : ""}${s}`;
+  };
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Render
+  // ───────────────────────────────────────────────────────────────────────────
+  if (callState === "idle") return null;
+
+  const isPreConnect = callState === "incoming" || callState === "ringing";
+
+  return (
+    <div
+      className={isPreConnect ? `${callCss.overlay} ${callCss.overlayIncoming}` : undefined}
+      style={!isPreConnect ? styles.overlayContainer : undefined}
+    >
+      <audio ref={remoteAudioRef} autoPlay playsInline style={{ display: "none" }} />
+
+      {/* ── Incoming Call ── */}
+      {callState === "incoming" && (
+        <div className={callCss.incomingScreen}>
+          <div className={callCss.incomingBody}>
+            <div className={callCss.avatarWrap}>
+              <div className={callCss.pulseRing} />
+              <div className={callCss.avatar}>📞</div>
+            </div>
+            <h2 className={callCss.callerName}>{callerEmail.split("@")[0]}</h2>
+            <p className={callCss.callTypeLabel}>Incoming {callType.replace("_", " ")} call</p>
+          </div>
+          <div className={callCss.incomingActions}>
+            <div className={callCss.buttonRow}>
+              <button type="button" className={`${callCss.callBtn} ${callCss.declineBtn}`} onClick={declineOrEndCall}>
+                Decline
+              </button>
+              <button type="button" className={`${callCss.callBtn} ${callCss.acceptBtn}`} onClick={acceptCall}>
+                Accept
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Ringing / Outgoing ── */}
+      {callState === "ringing" && (
+        <div className={callCss.ringingScreen}>
+          <div className={callCss.ringingBody}>
+            <div className={callCss.avatarWrap}>
+              <div className={callCss.pulseRing} />
+              <div className={callCss.avatar}>🔊</div>
+            </div>
+            <h2 className={callCss.callerName}>Calling Partner...</h2>
+            <p className={callCss.callTypeLabel}>Dialing {callType.replace("_", " ")}...</p>
+          </div>
+          <div className={callCss.ringingActions}>
+            <button type="button" className={callCss.cancelBtn} onClick={declineOrEndCall}>
+              Cancel Dialing
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* ── Active Call ── */}
+      {callState === "active" && (
+        <div style={styles.activeCallContainer}>
+          {!isMediaConnected && (
+            <div style={styles.connectingBanner}>
+              <span style={styles.reconnectingText}>Connecting call...</span>
+            </div>
+          )}
+
+          {quotaWarning && (
+            <div style={styles.quotaWarningBanner}>
+              <span style={styles.quotaWarningText}>
+                {quotaWarning.message || `~${quotaWarning.remainingMinutes} min left today`}
+              </span>
+              <button
+                style={styles.quotaWarningBtn}
+                onClick={() => handleAddExtraMinutes(60)}
+                disabled={isAddingMinutes}
+              >
+                {isAddingMinutes ? "Adding..." : "Add 60 Extra Minutes"}
+              </button>
+            </div>
+          )}
+
+          {isReconnecting && (
+            <div style={styles.reconnectingBanner}>
+              <span style={styles.reconnectingText}>
+                {turnEscalatedRef.current ? "🔄 Switching to relay..." : "🔄 Reconnecting..."}
+              </span>
+            </div>
+          )}
+
+          {/* Debug Panel */}
+          {debug === true && (
+            <div style={styles.debugPanel}>
+              <div style={styles.debugHeader}>🛠 WebRTC Diagnostics</div>
+              <div style={styles.debugRow}><span>Connection:</span><span>{debugConnectionState}</span></div>
+              <div style={styles.debugRow}><span>ICE State:</span><span>{debugIceState}</span></div>
+              <div style={styles.debugRow}><span>Remote Track:</span><span>{remoteTrackStatus}</span></div>
+              <div style={styles.debugRow}>
+                <span>Candidate:</span>
+                <span>
+                  {selectedCandidatePairRef.current
+                    ? `${selectedCandidatePairRef.current.localType}↔${selectedCandidatePairRef.current.remoteType}`
+                    : "—"}
+                </span>
+              </div>
+              <div style={styles.debugRow}><span>Recovery:</span><span>{recoveryAttemptsRef.current}/{MAX_RECOVERY_CYCLES}</span></div>
+              <div style={styles.debugRow}><span>TURN:</span><span>{turnEscalatedRef.current ? "Active" : "No"}</span></div>
+              <div style={styles.debugRow}><span>Current Step:</span><span>{debugCurrentStep}</span></div>
+              <div style={styles.debugRow}><span>Media Status:</span><span>{debugMediaStatus}</span></div>
+              {callErrorMessage && <div style={styles.debugError}>⚠️ {callErrorMessage}</div>}
+              <button style={styles.debugForcePlayBtn} onClick={forcePlayAllVideos}>Force Play Video</button>
+            </div>
+          )}
+
+          {/* Voice-only screen */}
+          <div style={{ ...styles.audioMainScreen, display: callType === "voice" ? "flex" : "none" }}>
+            <div style={styles.avatar}>🗣</div>
+            <h3 style={styles.callerName}>Ongoing Voice Call</h3>
+            <div style={styles.timer}>{formatDuration(duration)}</div>
+          </div>
+
+          {/* Video screen */}
+          <div style={{ ...styles.videoMainScreen, display: callType !== "voice" ? "block" : "none" }}>
+            {/* muted is intentional and REQUIRED for mobile autoplay compliance.
+                iOS/Android Safari blocks unmuted video autoplay even after a user
+                gesture if the play() call is async (which ontrack always is).
+                Audio from the remote peer is handled by the remoteAudioRef <audio>
+                element above, which shares the same MediaStream. Do NOT remove muted. */}
+            <video
+              ref={remoteVideoRef}
+              autoPlay
+              playsInline
+              muted
+              controls={false}
+              style={{
+                ...styles.remoteVideo,
+                filter: callType === "blind_date" && !cameraUnlocked ? "blur(30px)" : "none",
+                transition: "filter 0.5s ease",
+              }}
+            />
+            {callType === "blind_date" && !cameraUnlocked && (
+              <div style={styles.blurOverlay}>
+                <p style={styles.blurText}>🎭 Video is blurred for the first 5 minutes</p>
+              </div>
+            )}
+            <div style={styles.pipVideoBox}>
+              <video ref={localVideoRef} autoPlay muted playsInline style={styles.localVideo} />
+            </div>
+            <div style={styles.overlayMeta}>
+              <div style={styles.timerVideo}>{formatDuration(duration)}</div>
+            </div>
+          </div>
+
+          {/* Controls */}
+          <div style={styles.controlsBar}>
+            <button style={{ ...styles.controlBtn, background: muted ? "var(--pink)" : "var(--dark-600)" }} onClick={toggleMute}>
+              {muted ? "🔇 Unmute" : "🎙 Mute"}
+            </button>
+            {(callType === "video" || callType === "blind_date") && (
+              <button style={{ ...styles.controlBtn, background: cameraActive ? "var(--dark-600)" : "var(--pink)" }} onClick={toggleCamera}>
+                {cameraActive ? "📹 Camera Off" : "📷 Camera On"}
+              </button>
+            )}
+            {callType === "blind_date" && (
+              <button
+                style={{ ...styles.controlBtn, background: chatSaved ? "var(--teal)" : "var(--pink-dim)", color: chatSaved ? "#fff" : "var(--pink-soft)" }}
+                onClick={saveChatVote}
+                disabled={chatSaved}
+              >
+                {chatSaved ? "✓ Vote Saved" : "💖 Save Contact"}
+              </button>
+            )}
+            <button style={{ ...styles.controlBtn, ...styles.declineBtn }} onClick={declineOrEndCall}>📞 End Call</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+const styles = {
+  overlayContainer: {
+    position: "fixed", inset: 0, background: "rgba(8,8,8,0.9)", zIndex: 10000,
+    display: "flex", flexDirection: "column",
+    backdropFilter: "blur(8px)",
+    paddingTop: "env(safe-area-inset-top, 0px)",
+    paddingBottom: "env(safe-area-inset-bottom, 0px)",
+  },
+  callCard: {
+    background: "var(--dark-800)", border: "0.5px solid var(--dark-600)", borderRadius: 28,
+    width: "90%", maxWidth: 360, padding: "36px 24px", textAlign: "center",
+    display: "flex", flexDirection: "column", alignItems: "center", position: "relative", overflow: "hidden",
+  },
+  avatar: {
+    width: 80, height: 80, borderRadius: "50%", background: "var(--pink-dim)",
+    border: "2px solid var(--pink)", fontSize: 32, display: "flex",
+    alignItems: "center", justifyContent: "center", marginBottom: 20, color: "var(--pink-soft)",
+  },
+  callerName: { fontFamily: "var(--font-display)", fontSize: 22, fontWeight: 700, color: "var(--white)", marginBottom: 8 },
+  callTypeLabel: { fontSize: 13, color: "var(--dark-200)", marginBottom: 28 },
+  buttonRow: { display: "flex", gap: 12, width: "100%" },
+  callBtn: { flex: 1, height: 48, borderRadius: 24, fontSize: 14, fontWeight: 700, border: "none", fontFamily: "var(--font-display)", cursor: "pointer" },
+  declineBtn: { background: "#EF4444", color: "#fff" },
+  acceptBtn: { background: "var(--teal)", color: "#fff", boxShadow: "0 4px 14px rgba(0,212,170,0.3)" },
+  pulseRing: {
+    position: "absolute", top: 36, width: 80, height: 80, borderRadius: "50%",
+    border: "2px solid var(--pink)", animation: "pulse 1.8s infinite ease-in-out",
+  },
+  pulseRingDialing: {
+    position: "absolute", top: 36, width: 80, height: 80, borderRadius: "50%",
+    border: "2px solid var(--pink)", animation: "pulse 1.8s infinite ease-in-out",
+  },
+  activeCallContainer: { width: "100%", height: "100%", display: "flex", flexDirection: "column", overflow: "hidden" },
+  audioMainScreen: { flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", minHeight: 0, overflow: "hidden" },
+  timer: { fontSize: 18, color: "var(--pink-soft)", fontWeight: 600, marginTop: 10, fontFamily: "var(--font-mono, monospace)" },
+  timerVideo: { background: "rgba(0,0,0,0.5)", padding: "6px 12px", borderRadius: 14, fontSize: 13, color: "#fff", fontFamily: "var(--font-mono, monospace)", zIndex: 2 },
+  videoMainScreen: { flex: 1, position: "relative", background: "#000", minHeight: 0, overflow: "hidden" },
+  remoteVideo: { position: "absolute", top: 0, left: 0, width: "100%", height: "100%", objectFit: "cover" },
+  pipVideoBox: { position: "absolute", top: 24, right: 24, width: 90, height: 120, borderRadius: 12, overflow: "hidden", border: "1px solid rgba(255,255,255,0.2)", boxShadow: "0 4px 20px rgba(0,0,0,0.6)", background: "#111", zIndex: 3 },
+  localVideo: { width: "100%", height: "100%", objectFit: "cover" },
+  overlayMeta: { position: "absolute", bottom: 24, left: 24, zIndex: 2 },
+  controlsBar: {
+    minHeight: 88, background: "var(--dark-900)", borderTop: "0.5px solid var(--dark-700)",
+    display: "flex", alignItems: "center", justifyContent: "center", gap: 16,
+    padding: "12px 24px max(12px, env(safe-area-inset-bottom, 12px))", flexShrink: 0, zIndex: 10,
+  },
+  controlBtn: { height: 44, padding: "0 20px", borderRadius: 22, border: "none", color: "#fff", fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: "var(--font-display)", display: "flex", alignItems: "center", gap: 6 },
+  blurOverlay: { position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(0,0,0,0.4)", pointerEvents: "none" },
+  blurText: { fontFamily: "var(--font-display)", fontSize: 14, fontWeight: 600, color: "#fff", background: "rgba(0,0,0,0.6)", padding: "8px 16px", borderRadius: 20, border: "0.5px solid var(--dark-500)" },
+  connectingBanner: { position: "absolute", top: 24, left: "50%", transform: "translateX(-50%)", background: "rgba(59,130,246,0.9)", backdropFilter: "blur(8px)", padding: "8px 16px", borderRadius: 20, border: "0.5px solid rgba(255,255,255,0.2)", zIndex: 999, boxShadow: "0 4px 12px rgba(0,0,0,0.5)" },
+  reconnectingBanner: { position: "absolute", top: 24, left: "50%", transform: "translateX(-50%)", background: "rgba(239,68,68,0.85)", backdropFilter: "blur(8px)", padding: "8px 16px", borderRadius: 20, border: "0.5px solid rgba(255,255,255,0.2)", zIndex: 999, boxShadow: "0 4px 12px rgba(0,0,0,0.5)" },
+  reconnectingText: { color: "#fff", fontFamily: "var(--font-display)", fontSize: 13, fontWeight: 600 },
+  quotaWarningBanner: { position: "absolute", top: 72, left: "50%", transform: "translateX(-50%)", background: "rgba(245,158,11,0.95)", backdropFilter: "blur(8px)", padding: "10px 16px", borderRadius: 20, border: "0.5px solid rgba(255,255,255,0.2)", zIndex: 999, boxShadow: "0 4px 12px rgba(0,0,0,0.5)", display: "flex", alignItems: "center", gap: 12, maxWidth: "90%" },
+  quotaWarningText: { color: "#fff", fontFamily: "var(--font-display)", fontSize: 12, fontWeight: 600 },
+  quotaWarningBtn: { height: 32, padding: "0 14px", borderRadius: 16, border: "none", background: "#fff", color: "#B45309", fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "var(--font-display)", whiteSpace: "nowrap" },
+  debugPanel: { position: "absolute", top: 24, left: 24, width: 300, background: "rgba(18,18,18,0.95)", border: "1px solid var(--dark-500)", borderRadius: 12, padding: 16, zIndex: 9999, fontFamily: "var(--font-display), system-ui, sans-serif", fontSize: 12, color: "#fff", boxShadow: "0 8px 32px rgba(0,0,0,0.5)", backdropFilter: "blur(8px)", display: "flex", flexDirection: "column", gap: 8 },
+  debugHeader: { fontWeight: 700, fontSize: 13, color: "var(--pink-soft)", borderBottom: "0.5px solid var(--dark-600)", paddingBottom: 6, marginBottom: 4 },
+  debugRow: { display: "flex", justifyContent: "space-between", alignItems: "center" },
+  debugError: { background: "rgba(239,68,68,0.2)", border: "0.5px solid #EF4444", borderRadius: 6, padding: 8, color: "#FCA5A5", fontWeight: 500 },
+  debugForcePlayBtn: { marginTop: 8, height: 32, background: "var(--pink)", color: "#fff", border: "none", borderRadius: 16, fontWeight: 600, cursor: "pointer", fontSize: 11, transition: "background 0.2s ease" },
+};

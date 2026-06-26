@@ -1,0 +1,59 @@
+.page {
+  /* preserve default desktop layout */
+}
+
+.sidebar {
+  /* preserve default desktop layout */
+}
+
+.sidebarHeader {
+  /* preserve default desktop layout */
+}
+
+.convoItem {
+  /* preserve default desktop layout */
+}
+
+.separator {
+  /* preserve default desktop layout */
+}
+
+@media (max-width: 999px) {
+  .page {
+    flex-direction: column !important;
+    overflow: visible !important;
+  }
+
+  .sidebar {
+    width: 100% !important;
+    border-right: none !important;
+    border-bottom: 0.5px solid var(--dark-600) !important;
+    min-height: auto !important;
+  }
+
+  .sidebarHeader {
+    padding: 16px 14px 12px !important;
+  }
+
+  .convoList {
+    max-height: none !important;
+  }
+
+  .convoItem {
+    padding: 10px 14px !important;
+  }
+
+  .separator {
+    margin: 0 12px !important;
+  }
+}
+
+@media (max-width: 767px) {
+  .sidebarHeader {
+    padding: 14px 12px 10px !important;
+  }
+
+  .convoItem {
+    gap: 10px !important;
+  }
+}

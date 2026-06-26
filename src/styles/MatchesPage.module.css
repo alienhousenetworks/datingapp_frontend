@@ -1,0 +1,118 @@
+.page {
+  /* default desktop/tablet layout stays driven by inline styles */
+}
+
+.header {
+  /* no desktop overrides */
+}
+
+.section {
+  /* no desktop overrides */
+}
+
+.newMatchRow {
+  /* no desktop overrides */
+}
+
+.requestCard {
+  /* no desktop overrides */
+}
+
+.convoList {
+  /* no desktop overrides */
+}
+
+.convoItem {
+  /* no desktop overrides */
+}
+
+.divider {
+  /* no desktop overrides */
+}
+
+.emptyNote {
+  /* no desktop overrides */
+}
+
+@media (max-width: 999px) {
+  .page {
+    padding-bottom: 16px !important;
+  }
+
+  .header {
+    padding: 18px 20px 14px !important;
+  }
+
+  .section {
+    padding: 18px 20px !important;
+  }
+
+  .newMatchRow {
+    flex-wrap: wrap !important;
+    gap: 12px !important;
+    padding-bottom: 4px !important;
+  }
+
+  .newMatchItem {
+    width: auto !important;
+    min-width: 84px !important;
+  }
+
+  .requestCard {
+    width: 100% !important;
+  }
+
+  .convoList {
+    padding: 0 0 4px 0 !important;
+  }
+
+  .convoItem {
+    padding: 12px 14px !important;
+  }
+
+  .divider {
+    margin: 0 14px !important;
+  }
+
+  .emptyNote {
+    padding: 24px 14px !important;
+  }
+}
+
+@media (max-width: 767px) {
+  .header {
+    padding: 16px 14px 12px !important;
+  }
+
+  .section {
+    padding: 16px 14px !important;
+  }
+
+  .newMatchRow {
+    gap: 10px !important;
+  }
+
+  .newMatchItem {
+    flex: 1 1 100% !important;
+    min-width: 0 !important;
+    max-width: none !important;
+    align-items: flex-start !important;
+  }
+
+  .requestCard {
+    width: 100% !important;
+    padding: 14px !important;
+  }
+
+  .convoItem {
+    padding: 10px 12px !important;
+  }
+
+  .divider {
+    margin: 0 12px !important;
+  }
+
+  .emptyNote {
+    padding: 20px 12px !important;
+  }
+}

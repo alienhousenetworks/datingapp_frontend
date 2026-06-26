@@ -166,6 +166,104 @@ export default function CallManager({ user, debug }) {
   const handleSocketMessageRef = useRef(null);
   const cleanupCallRef = useRef(null);
 
+  // Per-call lifecycle timeline (debug with window.dumpCallTimeline())
+  const pcInstanceIdRef = useRef(0);
+  const lastSignalingStateRef = useRef("new");
+  const lastIceStateRef = useRef("new");
+  const lastConnectionStateRef = useRef("new");
+  const callTimelineRef = useRef({
+    callId: null,
+    events: [],
+    counters: {
+      pcCreated: 0,
+      offersCreated: 0,
+      offersSent: 0,
+      offersReceived: 0,
+      offersIgnored: 0,
+      answersCreated: 0,
+      answersSent: 0,
+      answersReceived: 0,
+      localCandidatesGenerated: 0,
+      localCandidatesSent: 0,
+      remoteCandidatesReceived: 0,
+      remoteCandidatesApplied: 0,
+      remoteCandidatesQueued: 0,
+      remoteCandidatesFailed: 0,
+      setConfigurationCalls: 0,
+      restartIceCalls: 0,
+    },
+  });
+
+  const getTimelineContext = () => ({
+    callId: callIdRef.current,
+    role: isInitiatorRef.current ? "caller" : "callee",
+    pcInstance: pcInstanceIdRef.current,
+    iceState: pcRef.current?.iceConnectionState ?? lastIceStateRef.current,
+    signalingState: pcRef.current?.signalingState ?? lastSignalingStateRef.current,
+    connectionState: pcRef.current?.connectionState ?? lastConnectionStateRef.current,
+    initialIcePhase: isInitialIcePhase(),
+    elapsedMs: callStartTimeRef.current ? Date.now() - callStartTimeRef.current : 0,
+  });
+
+  const timelineBump = (counter, extra = {}) => {
+    const c = callTimelineRef.current.counters;
+    c[counter] = (c[counter] || 0) + 1;
+    logWebRTC("TIMELINE_COUNTER", { counter, count: c[counter], ...getTimelineContext(), ...extra });
+  };
+
+  const timelineLog = (event, extra = {}) => {
+    const entry = { event, ...getTimelineContext(), ...extra };
+    callTimelineRef.current.events.push({ t: Date.now(), ...entry });
+    logWebRTC("TIMELINE", entry);
+    if (event === "PC_CREATED" && callTimelineRef.current.counters.pcCreated > 1) {
+      log.warn("Multiple PeerConnections created for same call — extra offers likely.", {
+        pcCreated: callTimelineRef.current.counters.pcCreated,
+        callId: callIdRef.current,
+      });
+    }
+  };
+
+  const auditAction = (action, reason, extra = {}) => {
+    logWebRTC("AUDIT", {
+      action,
+      reason,
+      caller: action,
+      why: reason,
+      ...getTimelineContext(),
+      ...extra,
+    });
+    timelineLog(action, { reason, ...extra });
+  };
+
+  const resetCallTimeline = (callId) => {
+    callTimelineRef.current = {
+      callId,
+      events: [],
+      counters: {
+        pcCreated: 0,
+        offersCreated: 0,
+        offersSent: 0,
+        offersReceived: 0,
+        offersIgnored: 0,
+        answersCreated: 0,
+        answersSent: 0,
+        answersReceived: 0,
+        localCandidatesGenerated: 0,
+        localCandidatesSent: 0,
+        remoteCandidatesReceived: 0,
+        remoteCandidatesApplied: 0,
+        remoteCandidatesQueued: 0,
+        remoteCandidatesFailed: 0,
+        setConfigurationCalls: 0,
+        restartIceCalls: 0,
+      },
+    };
+    lastSignalingStateRef.current = "new";
+    lastIceStateRef.current = "new";
+    lastConnectionStateRef.current = "new";
+    timelineLog("TIMELINE_RESET", { callId });
+  };
+
   // ───────────────────────────────────────────────────────────────────────────
   // Helpers
   // ───────────────────────────────────────────────────────────────────────────
@@ -229,9 +327,10 @@ export default function CallManager({ user, debug }) {
     };
   };
 
-  const closePeerConnection = () => {
+  const closePeerConnection = (reason = "unspecified") => {
     const pc = pcRef.current;
     if (pc) {
+      auditAction("PC_CLOSED", reason);
       pc.oniceconnectionstatechange = null;
       pc.onconnectionstatechange = null;
       pc.onicegatheringstatechange = null;
@@ -284,13 +383,19 @@ export default function CallManager({ user, debug }) {
   };
 
   const tryRestartIceWithoutSdp = (reason) => {
+    auditAction("restartIce()", reason);
     if (!canInterruptInitialIce()) {
       logWebRTC("ICE_RESTART_WITHOUT_SDP_BLOCKED", { reason, phase: "initial" });
       return false;
     }
     const pc = pcRef.current;
     if (!pc || typeof pc.restartIce !== "function") return false;
+    if (["checking", "connected", "completed"].includes(pc.iceConnectionState)) {
+      logWebRTC("ICE_RESTART_WITHOUT_SDP_BLOCKED", { reason, iceState: pc.iceConnectionState });
+      return false;
+    }
     try {
+      timelineBump("restartIceCalls", { reason });
       pc.restartIce();
       logWebRTC("ICE_RESTART_WITHOUT_SDP", { reason });
       return true;
@@ -301,8 +406,10 @@ export default function CallManager({ user, debug }) {
   };
 
   const sendIceRestartOffer = async (reason) => {
+    auditAction("createOffer(iceRestart)", reason);
     if (!canInterruptInitialIce()) {
       logWebRTC("SDP_OFFER_BLOCKED", { reason, detail: "initial_ice_phase" });
+      timelineBump("offersIgnored", { reason: "initial_ice_phase" });
       return false;
     }
     const pc = pcRef.current;
@@ -311,9 +418,13 @@ export default function CallManager({ user, debug }) {
 
     iceRestartInFlightRef.current = true;
     try {
+      timelineLog("createOffer(iceRestart)");
       const offer = await pc.createOffer({ iceRestart: true });
+      timelineBump("offersCreated", { reason, iceRestart: true });
+      timelineLog("setLocalDescription(iceRestart-offer)");
       await pc.setLocalDescription(offer);
       sendSignaling({ action: "offer", sdp: offer.sdp });
+      timelineBump("offersSent", { reason, iceRestart: true });
       logWebRTC("SDP_OFFER_SENT", { reason, iceRestart: true });
       return true;
     } catch (err) {
@@ -342,6 +453,7 @@ export default function CallManager({ user, debug }) {
   };
 
   const escalateToTurn = async () => {
+    auditAction("setConfiguration(TURN)", "turn_escalation");
     if (!canInterruptInitialIce()) {
       log.turn("TURN escalation deferred — initial ICE phase still running.");
       return;
@@ -357,6 +469,7 @@ export default function CallManager({ user, debug }) {
       const res = await callAPI.getIceServers(false, false);
       const turnServers = mapIceServersFromApi(res?.iceServers);
       const fullConfig = buildRtcConfiguration([...DEFAULT_STUN_SERVERS, ...turnServers]);
+      timelineBump("setConfigurationCalls", { reason: "turn_escalation" });
       pc.setConfiguration(fullConfig);
       log.turn("TURN servers applied via setConfiguration.");
     } catch (err) {
@@ -680,16 +793,25 @@ export default function CallManager({ user, debug }) {
   };
 
   const createAndSendOffer = async (options = {}, reason = "initial") => {
+    auditAction("createOffer()", reason, { iceRestart: !!options.iceRestart });
     if (!ALLOWED_OFFER_REASONS.has(reason)) {
       logWebRTC("SDP_OFFER_BLOCKED", { reason });
+      timelineBump("offersIgnored", { reason });
+      return false;
+    }
+    if (!canInterruptInitialIce() && reason !== "initial") {
+      logWebRTC("SDP_OFFER_BLOCKED", { reason, detail: "initial_ice_phase" });
+      timelineBump("offersIgnored", { reason: "initial_ice_phase" });
       return false;
     }
     if (reason === "initial" && initialNegotiationStartedRef.current) {
       logWebRTC("SDP_OFFER_BLOCKED", { reason: "initial_already_started" });
+      timelineBump("offersIgnored", { reason: "initial_already_started" });
       return false;
     }
     if (isNegotiatingRef.current) {
       logWebRTC("SDP_OFFER_BLOCKED", { reason, detail: "negotiation_in_progress" });
+      timelineBump("offersIgnored", { reason: "negotiation_in_progress" });
       return false;
     }
 
@@ -709,13 +831,17 @@ export default function CallManager({ user, debug }) {
           setupDataChannel(pc, isInitiatorRef.current);
           initialNegotiationStartedRef.current = true;
         }
+        timelineLog("createOffer()");
         const offer = await pc.createOffer(options);
+        timelineBump("offersCreated", { reason });
         logWebRTC("SDP_OFFER_CREATED", { sdpType: "offer", reason, offerCreatedAt: Date.now() });
+        timelineLog("setLocalDescription(offer)");
         await pc.setLocalDescription(offer);
         logWebRTC("SDP_LOCAL_DESC_SET", { sdpType: "offer", reason });
         offerCreatedTimeRef.current = Date.now();
         transitionRTCState("WAITING_ANSWER", { reason });
         sendSignaling({ action: "offer", sdp: offer.sdp });
+        timelineBump("offersSent", { reason });
         logWebRTC("SDP_OFFER_SENT", { reason });
         return true;
       } finally {
@@ -931,6 +1057,12 @@ export default function CallManager({ user, debug }) {
           }
         }
         // Phase 8 — structured log for candidate pair analysis
+        timelineLog("SELECTED_CANDIDATE_PAIR", {
+          localType: lType,
+          remoteType: rType,
+          localIp: selectedCandidatePairRef.current.localIp,
+          remoteIp: selectedCandidatePairRef.current.remoteIp,
+        });
         logWebRTC("CANDIDATE_PAIR_ANALYSIS", {
           localCandidateType: lType || "unknown",
           remoteCandidateType: rType || "unknown",
@@ -1137,8 +1269,12 @@ export default function CallManager({ user, debug }) {
   // ───────────────────────────────────────────────────────────────────────────
   const setupConnectionListeners = (pc, isInitiator) => {
     pc.onsignalingstatechange = () => {
-      trace("SDP", "signaling state changed", { signalingState: pc.signalingState });
-      logWebRTC("SIGNALING_STATE", { state: pc.signalingState });
+      const prev = lastSignalingStateRef.current;
+      const next = pc.signalingState;
+      lastSignalingStateRef.current = next;
+      trace("SDP", "signaling state changed", { signalingState: next });
+      timelineLog("SIGNALING_STATE_CHANGED", { from: prev, to: next });
+      logWebRTC("SIGNALING_STATE", { state: next, from: prev });
       if (pc.signalingState === "stable") {
         transitionRTCState("STABLE");
         negotiationQueuedRef.current = false;
@@ -1176,6 +1312,7 @@ export default function CallManager({ user, debug }) {
         transitionRTCState("GATHERING_CANDIDATES");
         if (iceGatheringStartTimeRef.current === 0) {
           iceGatheringStartTimeRef.current = Date.now();
+          timelineLog("ICE_GATHERING_STARTED");
         }
       }
       if (state === "complete") {
@@ -1196,9 +1333,12 @@ export default function CallManager({ user, debug }) {
     // ── ICE connection state (Phase 2) ──
     pc.oniceconnectionstatechange = () => {
       const state = pc.iceConnectionState;
+      const prev = lastIceStateRef.current;
+      lastIceStateRef.current = state;
       const elapsedMs = Date.now() - connectionStartTimeRef.current;
       trace("ICE", "state changed", { state, elapsedMs });
-      logWebRTC("ICE_CONNECTION_STATE", { state, elapsedMs });
+      timelineLog("ICE_STATE_CHANGED", { from: prev, to: state, elapsedMs });
+      logWebRTC("ICE_CONNECTION_STATE", { state, from: prev, elapsedMs });
       setDebugIceState(state);
 
       switch (state) {
@@ -1314,8 +1454,11 @@ export default function CallManager({ user, debug }) {
     // ── Overall connection state / DTLS (Phase 5) ──
     pc.onconnectionstatechange = () => {
       const state = pc.connectionState;
+      const prev = lastConnectionStateRef.current;
+      lastConnectionStateRef.current = state;
       const elapsedMs = Date.now() - connectionStartTimeRef.current;
-      logWebRTC("CONNECTION_STATE", { state, elapsedMs });
+      timelineLog("CONNECTION_STATE_CHANGED", { from: prev, to: state, elapsedMs });
+      logWebRTC("CONNECTION_STATE", { state, from: prev, elapsedMs });
       setDebugConnectionState(state);
 
       if (state === "connected") {
@@ -1349,6 +1492,8 @@ export default function CallManager({ user, debug }) {
           return;
         }
         const { type, family } = trackCandidateTelemetry(event.candidate.candidate, "local");
+        timelineBump("localCandidatesGenerated");
+        timelineLog("LOCAL_CANDIDATE_GENERATED", { type, family });
         logWebRTC("ICE_CANDIDATE_LOCAL_SENT", {
           type: type || "unknown",
           family,
@@ -1359,6 +1504,8 @@ export default function CallManager({ user, debug }) {
             (candidateCountsRef.current.relay || 0),
           families: { ...localCandidateFamiliesRef.current },
         });
+        timelineBump("localCandidatesSent");
+        timelineLog("LOCAL_CANDIDATE_SENT");
         sendSignaling({ action: "ice_candidate", candidate: serialized });
       } else {
         logWebRTC("ICE_GATHERING_NULL_CANDIDATE", {
@@ -1367,6 +1514,7 @@ export default function CallManager({ user, debug }) {
           families: { ...localCandidateFamiliesRef.current },
         });
         iceGatheringEndTimeRef.current = iceGatheringEndTimeRef.current || Date.now();
+        timelineLog("ICE_GATHERING_COMPLETE_SIGNAL");
         sendSignaling({ action: "ice_candidate", candidate: null });
       }
     };
@@ -1519,11 +1667,24 @@ export default function CallManager({ user, debug }) {
     switch (type) {
       case "offer":
         await runPeerOperation("handleRemoteOffer", async () => {
+          timelineBump("offersReceived");
+          timelineLog("OFFER_RECEIVED");
           logWebRTC("SDP_OFFER_RECEIVED", { sdpType: "offer" });
           const pc = pcRef.current;
           const iceRestartOffer = isIceRestartSdp(msg.sdp, pc);
 
-          if (initialNegotiationCompleteRef.current && !iceRestartOffer) {
+          if (isInitialIcePhase()) {
+            if (initialNegotiationCompleteRef.current) {
+              timelineBump("offersIgnored", { reason: "initial_ice_patience_window" });
+              logWebRTC("SDP_OFFER_IGNORED", {
+                reason: "initial_ice_patience_window",
+                iceRestart: iceRestartOffer,
+                note: "Only one Offer/Answer allowed during first 60s — extra offers reset ICE to new",
+              });
+              return;
+            }
+          } else if (initialNegotiationCompleteRef.current && !iceRestartOffer) {
+            timelineBump("offersIgnored", { reason: "initial_negotiation_already_complete" });
             logWebRTC("SDP_OFFER_IGNORED", { reason: "initial_negotiation_already_complete" });
             return;
           }
@@ -1564,6 +1725,7 @@ export default function CallManager({ user, debug }) {
           isNegotiatingRef.current = true;
           remoteDescriptionAppliedRef.current = false;
           transitionRTCState("PREPARING_MEDIA", { remoteSdp: "offer", iceRestart: iceRestartOffer });
+          timelineLog("setRemoteDescription(offer)");
           await pc.setRemoteDescription(
             new RTCSessionDescription({ type: "offer", sdp: msg.sdp })
           );
@@ -1576,11 +1738,15 @@ export default function CallManager({ user, debug }) {
             await syncSendersWithTracks(pc);
           }
 
+          timelineLog("createAnswer()");
           const answer = await pc.createAnswer();
+          timelineBump("answersCreated", { iceRestart: iceRestartOffer });
           logWebRTC("SDP_ANSWER_CREATED", { sdpType: "answer", iceRestart: iceRestartOffer });
+          timelineLog("setLocalDescription(answer)");
           await pc.setLocalDescription(answer);
           logWebRTC("SDP_LOCAL_DESC_SET", { sdpType: "answer" });
           sendSignaling({ action: "answer", sdp: answer.sdp });
+          timelineBump("answersSent", { iceRestart: iceRestartOffer });
           logWebRTC("SDP_ANSWER_SENT", { iceRestart: iceRestartOffer });
 
           if (!iceRestartOffer) {
@@ -1595,6 +1761,8 @@ export default function CallManager({ user, debug }) {
 
       case "answer":
         await runPeerOperation("handleRemoteAnswer", async () => {
+          timelineBump("answersReceived");
+          timelineLog("ANSWER_RECEIVED");
           if (pcRef.current.signalingState !== "have-local-offer") {
             logWebRTC("SDP_ANSWER_IGNORED", {
               reason: "no_local_offer",
@@ -1613,6 +1781,7 @@ export default function CallManager({ user, debug }) {
           isNegotiatingRef.current = true;
           answerReceivedTimeRef.current = Date.now();
           remoteDescriptionAppliedRef.current = false;
+          timelineLog("setRemoteDescription(answer)");
           await pcRef.current.setRemoteDescription(
             new RTCSessionDescription({ type: "answer", sdp: msg.sdp })
           );
@@ -1649,10 +1818,13 @@ export default function CallManager({ user, debug }) {
           processedRemoteCandidatesRef.current.add(candidateKey);
 
           const { type, family } = trackCandidateTelemetry(candStr, "remote");
+          timelineBump("remoteCandidatesReceived");
+          timelineLog("REMOTE_CANDIDATE_RECEIVED", { type, family });
 
           if (pcRef.current && remoteDescriptionAppliedRef.current) {
             try {
               trace("ICE", "candidate applied", { type: type || "unknown", family, sdpMid: msg.candidate.sdpMid });
+              timelineLog("addIceCandidate()");
               logWebRTC("ICE_CANDIDATE_REMOTE_APPLIED", {
                 type: type || "unknown",
                 family,
@@ -1662,11 +1834,14 @@ export default function CallManager({ user, debug }) {
                 families: { ...remoteCandidateFamiliesRef.current },
               });
               await pcRef.current.addIceCandidate(new RTCIceCandidate(msg.candidate));
+              timelineBump("remoteCandidatesApplied");
             } catch (err) {
+              timelineBump("remoteCandidatesFailed");
               log.error("addIceCandidate failed:", err);
             }
           } else {
             trace("ICE", "candidate queued", { type: type || "unknown", sdpMid: msg.candidate.sdpMid });
+            timelineBump("remoteCandidatesQueued");
             logWebRTC("ICE_CANDIDATE_REMOTE_QUEUED", {
               type: type || "unknown",
               family,
@@ -1676,6 +1851,7 @@ export default function CallManager({ user, debug }) {
             pendingIceCandidates.current.push(msg.candidate);
           }
         } else {
+          timelineLog("REMOTE_CANDIDATE_END");
           logWebRTC("ICE_CANDIDATE_REMOTE_NULL", { meaning: "remote end-of-candidates" });
         }
         break;
@@ -2005,8 +2181,13 @@ export default function CallManager({ user, debug }) {
     const isStale = () => generation !== webrtcSetupGenerationRef.current
       || callStateRef.current !== "active";
 
+    auditAction("setupWebRTCPeer", isInitiator ? "caller" : "callee", { generation });
+
     webrtcPeerReadyRef.current = false;
-    closePeerConnection();
+    if (!callTimelineRef.current.callId || callTimelineRef.current.callId !== callIdRef.current) {
+      resetCallTimeline(callIdRef.current);
+    }
+    closePeerConnection("setupWebRTCPeer_restart");
 
     // Full state reset (DO NOT clear signalingQueueRef.current here)
     pendingIceCandidates.current = [];
@@ -2079,6 +2260,10 @@ export default function CallManager({ user, debug }) {
       const configuration = buildRtcConfiguration(stunServers);
       log.ice("Initialising RTCPeerConnection (STUN-only, pool=2, 60s initial ICE patience)");
 
+      pcInstanceIdRef.current += 1;
+      timelineBump("pcCreated");
+      timelineLog("PC_CREATED", { generation, iceCandidatePoolSize: configuration.iceCandidatePoolSize });
+
       const pc = new RTCPeerConnection(configuration);
       if (isStale()) {
         pc.close();
@@ -2087,6 +2272,24 @@ export default function CallManager({ user, debug }) {
 
       pcRef.current = pc;
       window.pc = pc;
+      window.dumpCallTimeline = () => {
+        const dump = {
+          callId: callIdRef.current,
+          counters: { ...callTimelineRef.current.counters },
+          events: [...callTimelineRef.current.events],
+          mismatch: {
+            localGeneratedVsSent:
+              callTimelineRef.current.counters.localCandidatesGenerated
+              - callTimelineRef.current.counters.localCandidatesSent,
+            remoteReceivedVsApplied:
+              callTimelineRef.current.counters.remoteCandidatesReceived
+              - callTimelineRef.current.counters.remoteCandidatesApplied,
+          },
+        };
+        console.table(callTimelineRef.current.counters);
+        console.log("[WEBRTC][TIMELINE_DUMP]", dump);
+        return dump;
+      };
 
       setupConnectionListeners(pc, isInitiator);
       setupIceCandidateHandler(pc);
@@ -2294,6 +2497,9 @@ export default function CallManager({ user, debug }) {
   // ───────────────────────────────────────────────────────────────────────────
   function cleanupCall() {
     log.webrtc("cleanupCall() — tearing down session.");
+    if (typeof window !== "undefined" && window.dumpCallTimeline) {
+      window.dumpCallTimeline();
+    }
 
     // Submit metrics before destroying state
     runFailureClassification();

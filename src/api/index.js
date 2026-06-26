@@ -690,6 +690,36 @@ export const callAPI = {
     const res = await apiFetch(`/call/ice-servers/?force_turn=${forceTurn}&stun_only=${stunOnly}`);
     return res.json();
   },
+  submitNetworkProfile: async (profile) => {
+    const res = await apiFetch("/call/network-profile/", {
+      method: "POST",
+      body: JSON.stringify(profile),
+    });
+    return res.json();
+  },
+  getConnectionPrediction: async (calleeId) => {
+    const res = await apiFetch(`/call/connection-prediction/?callee_id=${calleeId}`);
+    return res.json();
+  },
+  getAdaptiveIceConfig: async (calleeId) => {
+    const res = await apiFetch(`/call/adaptive-ice-config/?callee_id=${calleeId}`);
+    return res.json();
+  },
+  getIceAnalytics: async (days = 7) => {
+    const res = await apiFetch(`/call/ice-analytics/?days=${days}`);
+    return res.json();
+  },
+  getP2PStats: async () => {
+    const res = await apiFetch("/call/p2p-stats/");
+    return res.json();
+  },
+  submitIceState: async (stateData) => {
+    const res = await apiFetch("/call/ice-state/", {
+      method: "POST",
+      body: JSON.stringify(stateData),
+    });
+    return res.json();
+  },
   submitMetrics: async (metricsData) => {
     const res = await apiFetch("/call/metrics/", {
       method: "POST",

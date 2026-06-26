@@ -26,11 +26,16 @@ const log = {
   error: (...a) => { console.error(`[WEBRTC][ERROR]`, { timestamp: new Date().toISOString(), detail: a }); },
 };
 
-// Pure P2P mode — STUN only, no TURN, no setConfiguration, single Offer/Answer
-const P2P_ONLY_MODE = true;
-const ICE_CANDIDATE_POOL_SIZE = 10;
+// Connection strategy:
+//   "hybrid"    — STUN + TURN in initial PC config, iceTransportPolicy "all" (P2P preferred).
+//                 ICE tries host/srflx/IPv6 first; relay only when hole-punch fails (~80–95% connect).
+//   "p2p_only"  — STUN only (testing / same-network). Fails on symmetric NAT / double CGNAT (Jio↔Airtel).
+const CONNECTION_MODE = "hybrid";
+const P2P_ONLY_MODE = CONNECTION_MODE === "p2p_only";
+const ICE_CANDIDATE_POOL_SIZE = 30;
+const CANDIDATE_CACHE_TTL_MS = 45000;
 
-// Phase 1 — Initial ICE stabilization (allow slow IPv6/cross-network checks)
+// Phase 1 — Initial ICE stabilization (adaptive timeout from backend prediction)
 const DISCONNECT_GRACE_MS = 12000;
 const INITIAL_DISCONNECT_GRACE_MS = 20000;
 const INITIAL_ICE_TIMEOUT_MS = 60000;
@@ -88,6 +93,7 @@ export default function CallManager({ user, debug }) {
   useEffect(() => { callIdRef.current = callId; }, [callId]);
   useEffect(() => { callTypeRef.current = callType; }, [callType]);
   useEffect(() => { installTimelineGlobals(); }, []);
+  useEffect(() => { runNetworkProbe(); }, []);
 
   // Active call UI state
   const [duration, setDuration] = useState(0);
@@ -148,6 +154,16 @@ export default function CallManager({ user, debug }) {
   const failureDiagnosisTimeoutRef = useRef(null); // Phase 9 failure engine
   const turnEscalatedRef = useRef(false);
   const turnFallbackOccurredRef = useRef(false);
+
+  // P2P Network Intelligence Stack
+  const adaptiveIceTimeoutMsRef = useRef(INITIAL_ICE_TIMEOUT_MS);
+  const iceCandidatePoolSizeRef = useRef(ICE_CANDIDATE_POOL_SIZE);
+  const connectionPredictionRef = useRef(null);
+  const calleeIdRef = useRef("");
+  const lastReportedIceStateRef = useRef("");
+  const networkProbeRunningRef = useRef(false);
+  const maxRecoveryCyclesRef = useRef(MAX_RECOVERY_CYCLES);
+  const coordinatedRestartApprovedRef = useRef(false);
 
   // Phase 4 — Telemetry timestamps
   const callStartTimeRef = useRef(0);
@@ -474,13 +490,152 @@ export default function CallManager({ user, debug }) {
     webrtcPeerReadyRef.current = false;
   };
 
-  const buildRtcConfiguration = (iceServers) => ({
-    iceServers: dedupeIceServers(filterStunOnlyIceServers(iceServers)),
-    iceTransportPolicy: "all",
-    iceCandidatePoolSize: ICE_CANDIDATE_POOL_SIZE,
-    bundlePolicy: "max-bundle",
-    rtcpMuxPolicy: "require",
-  });
+  const buildRtcConfiguration = (iceServers) => {
+    const servers = P2P_ONLY_MODE
+      ? dedupeIceServers(filterStunOnlyIceServers(iceServers))
+      : dedupeIceServers(iceServers);
+    return {
+      iceServers: servers,
+      iceTransportPolicy: "all",
+      iceCandidatePoolSize: iceCandidatePoolSizeRef.current,
+      bundlePolicy: "max-bundle",
+      rtcpMuxPolicy: "require",
+      continualGatheringPolicy: "gather_continually",
+    };
+  };
+
+  const detectClientEnvironment = () => {
+    const ua = navigator.userAgent || "";
+    let browser = "unknown";
+    if (ua.includes("Chrome")) browser = "Chrome";
+    else if (ua.includes("Firefox")) browser = "Firefox";
+    else if (ua.includes("Safari")) browser = "Safari";
+    let os = "unknown";
+    if (/Android/i.test(ua)) os = "Android";
+    else if (/iPhone|iPad/i.test(ua)) os = "iOS";
+    else if (/Windows/i.test(ua)) os = "Windows";
+    else if (/Mac/i.test(ua)) os = "macOS";
+    const conn = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+    return {
+      browser,
+      os,
+      connectionType: conn?.type || conn?.effectiveType || "",
+    };
+  };
+
+  const runNetworkProbe = async () => {
+    if (networkProbeRunningRef.current) return;
+    networkProbeRunningRef.current = true;
+    try {
+      const iceRes = await callAPI.getIceServers(false, true);
+      const stunServers = (iceRes?.iceServers || DEFAULT_STUN_SERVERS).slice(0, 6);
+      const probePc = new RTCPeerConnection({
+        iceServers: stunServers,
+        iceCandidatePoolSize: 4,
+      });
+      const counts = { host: 0, srflx: 0, relay: 0 };
+      let ipv6 = false;
+      const gatherStart = Date.now();
+      probePc.onicecandidate = (event) => {
+        if (!event.candidate?.candidate) return;
+        const c = event.candidate.candidate;
+        if (c.includes("typ host")) counts.host += 1;
+        if (c.includes("typ srflx")) counts.srflx += 1;
+        if (c.includes("typ relay")) counts.relay += 1;
+        const addr = c.split(" ")[4] || "";
+        if (addr.includes(":") && !/^\d+\.\d+\.\d+\.\d+$/.test(addr)) ipv6 = true;
+      };
+      probePc.createDataChannel("network_probe");
+      const offer = await probePc.createOffer();
+      await probePc.setLocalDescription(offer);
+      await new Promise((resolve) => setTimeout(resolve, 2800));
+      probePc.close();
+      const env = detectClientEnvironment();
+      const profile = {
+        ipv4: counts.host > 0 || counts.srflx > 0,
+        ipv6,
+        host_candidates: counts.host,
+        srflx_candidates: counts.srflx,
+        relay_candidates: counts.relay,
+        gathering_time: (Date.now() - gatherStart) / 1000,
+        stun_server: iceRes?.region || "regional",
+        browser: env.browser,
+        os: env.os,
+        transport: "UDP",
+        connection_type: env.connectionType,
+      };
+      const result = await callAPI.submitNetworkProfile(profile);
+      logWebRTC("NETWORK_PROFILE_UPLOADED", { ...profile, nat: result?.likely_nat_type });
+    } catch (err) {
+      log.warn("Network probe failed:", err);
+    } finally {
+      networkProbeRunningRef.current = false;
+    }
+  };
+
+  const loadCallIntelligence = async (peerId) => {
+    if (!peerId) return;
+    try {
+      const prediction = await callAPI.getConnectionPrediction(peerId);
+      connectionPredictionRef.current = prediction;
+      const adaptive = prediction?.adaptive_ice;
+      if (adaptive) {
+        adaptiveIceTimeoutMsRef.current = adaptive.initial_ice_timeout_ms || INITIAL_ICE_TIMEOUT_MS;
+        iceCandidatePoolSizeRef.current = adaptive.ice_candidate_pool_size || ICE_CANDIDATE_POOL_SIZE;
+        maxRecoveryCyclesRef.current = adaptive.max_recovery_cycles || MAX_RECOVERY_CYCLES;
+      }
+      logWebRTC("CONNECTION_PREDICTION", {
+        p2p_probability: prediction?.p2p_success_probability,
+        turn_recommended: prediction?.turn_recommended,
+        expected_ice_seconds: prediction?.expected_ice_seconds,
+        adaptive,
+      });
+    } catch (err) {
+      log.warn("Connection prediction unavailable:", err);
+    }
+  };
+
+  const reportIceState = (state, prev, elapsedMs) => {
+    if (!callIdRef.current || state === lastReportedIceStateRef.current) return;
+    lastReportedIceStateRef.current = state;
+    sendSignaling({
+      action: "ice_state",
+      call_id: callIdRef.current,
+      state,
+      previous_state: prev || "",
+      elapsed_ms: elapsedMs,
+    });
+    callAPI.submitIceState({
+      call_session_id: callIdRef.current,
+      state,
+      previous_state: prev || "",
+      elapsed_ms: elapsedMs,
+      metadata: { mode: CONNECTION_MODE },
+    }).catch(() => { });
+  };
+
+  const getCachedCandidates = () => {
+    try {
+      const raw = sessionStorage.getItem("spyce_ice_candidate_cache");
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      if (Date.now() - parsed.timestamp > CANDIDATE_CACHE_TTL_MS) return null;
+      return parsed;
+    } catch {
+      return null;
+    }
+  };
+
+  const saveCandidateCache = () => {
+    try {
+      sessionStorage.setItem("spyce_ice_candidate_cache", JSON.stringify({
+        timestamp: Date.now(),
+        localTypes: { ...localCandidateTypesRef.current },
+        families: { ...localCandidateFamiliesRef.current },
+        counts: { ...candidateCountsRef.current },
+      }));
+    } catch { /* quota */ }
+  };
 
   const extractIceUfrag = (sdp) => {
     const match = (sdp || "").match(/a=ice-ufrag:(\S+)/);
@@ -592,6 +747,12 @@ export default function CallManager({ user, debug }) {
       log.turn("TURN disabled — P2P_ONLY_MODE is active.");
       return;
     }
+    // Hybrid mode loads TURN at PC creation — mid-call setConfiguration disrupts ICE pairing.
+    if (CONNECTION_MODE === "hybrid") {
+      log.turn("TURN already in initial ICE config (hybrid mode) — skipping setConfiguration.");
+      turnEscalatedRef.current = true;
+      return;
+    }
     auditAction("setConfiguration(TURN)", "turn_escalation");
     if (!canInterruptInitialIce()) {
       log.turn("TURN escalation deferred — initial ICE phase still running.");
@@ -633,12 +794,13 @@ export default function CallManager({ user, debug }) {
       logWebRTC("P2P_ONLY_TIMEOUT", {
         callId: callIdRef.current,
         counters: { ...callTimelineRef.current.counters },
-        hint: "Test on same Wi-Fi first. TURN will be added in a later phase.",
+        hint: "Symmetric NAT / CGNAT cannot be hole-punched with STUN alone. Use CONNECTION_MODE=hybrid.",
       });
       setCallErrorMessage("P2P connection timed out. Try the same Wi-Fi network on both devices.");
       return;
     }
 
+    setCallErrorMessage("Still connecting — trying alternate routes...");
     if (!turnEscalatedRef.current) await escalateToTurn();
     if (tryRestartIceWithoutSdp("initial_timeout")) return;
     if (isInitiatorRef.current) {
@@ -648,6 +810,7 @@ export default function CallManager({ user, debug }) {
 
   const startInitialIceMonitor = () => {
     if (initialIceTimeoutRef.current) clearTimeout(initialIceTimeoutRef.current);
+    const timeoutMs = adaptiveIceTimeoutMsRef.current || INITIAL_ICE_TIMEOUT_MS;
     initialIceTimeoutRef.current = setTimeout(async () => {
       const pc = pcRef.current;
       if (!pc) return;
@@ -655,7 +818,9 @@ export default function CallManager({ user, debug }) {
 
       initialIcePhaseExpiredRef.current = true;
       logWebRTC("INITIAL_ICE_TIMEOUT", {
-        elapsedMs: INITIAL_ICE_TIMEOUT_MS,
+        elapsedMs: timeoutMs,
+        adaptive: true,
+        prediction: connectionPredictionRef.current?.p2p_success_probability,
         iceState: pc.iceConnectionState,
         connectionState: pc.connectionState,
         localCandidates: { ...candidateCountsRef.current },
@@ -663,7 +828,7 @@ export default function CallManager({ user, debug }) {
         remoteFamilies: { ...remoteCandidateFamiliesRef.current },
       });
       await beginInitialIceRecovery();
-    }, INITIAL_ICE_TIMEOUT_MS);
+    }, timeoutMs);
   };
 
   const handleAddExtraMinutes = async (minutes = 60) => {
@@ -1391,9 +1556,9 @@ export default function CallManager({ user, debug }) {
     lastIceRestartTimeRef.current = now;
 
     recoveryAttemptsRef.current += 1;
-    log.restart(`ICE restart attempt ${recoveryAttemptsRef.current}/${MAX_RECOVERY_CYCLES}...`);
+    log.restart(`ICE restart attempt ${recoveryAttemptsRef.current}/${maxRecoveryCyclesRef.current}...`);
 
-    if (recoveryAttemptsRef.current > MAX_RECOVERY_CYCLES) {
+    if (recoveryAttemptsRef.current > maxRecoveryCyclesRef.current) {
       if (!turnEscalatedRef.current) {
         await escalateToTurn();
         if (tryRestartIceWithoutSdp("recovery_turn_fallback")) return;
@@ -1409,12 +1574,23 @@ export default function CallManager({ user, debug }) {
       return;
     }
 
+    coordinatedRestartApprovedRef.current = false;
+    sendSignaling({ action: "ice_restart_request", call_id: callIdRef.current });
+
     if (tryRestartIceWithoutSdp("ice_restart_recovery")) return;
 
     if (isInitiatorRef.current) {
-      await sendIceRestartOffer("ice_restart_recovery");
+      if (coordinatedRestartApprovedRef.current) {
+        await sendIceRestartOffer("ice_restart_recovery");
+      } else {
+        setTimeout(async () => {
+          if (coordinatedRestartApprovedRef.current || canInterruptInitialIce()) {
+            await sendIceRestartOffer("ice_restart_recovery");
+          }
+        }, 1200);
+      }
     } else {
-      log.restart("Non-initiator waiting for remote ICE restart offer.");
+      log.restart("Non-initiator waiting for coordinated ICE restart approval.");
     }
   };
 
@@ -1495,6 +1671,7 @@ export default function CallManager({ user, debug }) {
       timelineLog("ICE_STATE_CHANGED", { from: prev, to: state, elapsedMs });
       logWebRTC("ICE_CONNECTION_STATE", { state, from: prev, elapsedMs });
       setDebugIceState(state);
+      reportIceState(state, prev, elapsedMs);
 
       switch (state) {
         case "checking":
@@ -1508,6 +1685,7 @@ export default function CallManager({ user, debug }) {
             iceConnectedTimeRef.current = Date.now();
             const iceConnectMs = iceConnectedTimeRef.current - callStartTimeRef.current;
             logWebRTC("ICE_CONNECTED", { iceConnectMs, state });
+            saveCandidateCache();
             notifyMediaConnected();
           }
           if (connectionEndTimeRef.current === 0) connectionEndTimeRef.current = Date.now();
@@ -1620,6 +1798,10 @@ export default function CallManager({ user, debug }) {
         logWebRTC("DTLS_CONNECTED", { elapsedMs });
         if (P2P_ONLY_MODE) {
           logWebRTC("P2P_CONNECTION_SUCCESSFUL", { callId: callIdRef.current, elapsedMs });
+        } else if (!turnFallbackOccurredRef.current) {
+          logWebRTC("P2P_ROUTE_SUCCESSFUL", { callId: callIdRef.current, elapsedMs, mode: CONNECTION_MODE });
+        } else {
+          logWebRTC("RELAY_ROUTE_SUCCESSFUL", { callId: callIdRef.current, elapsedMs, mode: CONNECTION_MODE });
         }
         setIsReconnecting(false);
         recoveryAttemptsRef.current = 0;
@@ -2050,6 +2232,7 @@ export default function CallManager({ user, debug }) {
         }
         setCallId(msg.call_id);
         callIdRef.current = msg.call_id;
+        calleeIdRef.current = msg.caller_id || "";
         resetCallTimeline(msg.call_id);
         setCallType(msg.call_type);
         setCallerEmail(msg.caller_email || "Someone");
@@ -2075,6 +2258,18 @@ export default function CallManager({ user, debug }) {
           remainingMinutes: msg.remaining_minutes,
           message: msg.message,
         });
+        break;
+      case "signaling_rejected":
+        logWebRTC("SIGNALING_REJECTED", { action: msg.action, reason: msg.reason });
+        break;
+      case "ice_restart_approved":
+        coordinatedRestartApprovedRef.current = true;
+        if (isInitiatorRef.current) {
+          sendIceRestartOffer("coordinated_restart").catch(() => { });
+        }
+        break;
+      case "ice_restart_pending":
+        logWebRTC("ICE_RESTART_PENDING", { votes: msg.restart_votes });
         break;
       case "offer":
       case "answer":
@@ -2404,21 +2599,42 @@ export default function CallManager({ user, debug }) {
     setIsReconnecting(false);
 
     try {
-      let stunServers = [...DEFAULT_STUN_SERVERS];
+      const cachedProbe = getCachedCandidates();
+      if (cachedProbe) {
+        logWebRTC("CANDIDATE_CACHE_HIT", { ageMs: Date.now() - cachedProbe.timestamp });
+      }
+
+      let iceServers = [...DEFAULT_STUN_SERVERS];
       try {
-        const res = await callAPI.getIceServers(false, true);
+        const res = await callAPI.getIceServers(false, P2P_ONLY_MODE);
         if (res?.iceServers?.length) {
-          const apiStun = filterStunOnlyIceServers(mapIceServersFromApi(res.iceServers));
-          stunServers = [...DEFAULT_STUN_SERVERS, ...apiStun];
+          const mapped = mapIceServersFromApi(res.iceServers);
+          iceServers = P2P_ONLY_MODE
+            ? [...DEFAULT_STUN_SERVERS, ...filterStunOnlyIceServers(mapped)]
+            : mapped;
+        }
+        if (res?.iceCandidatePoolSize) {
+          iceCandidatePoolSizeRef.current = res.iceCandidatePoolSize;
         }
       } catch (err) {
-        log.error("Failed to fetch STUN-only ICE servers, using defaults:", err);
+        log.error(`Failed to fetch ICE servers (mode=${CONNECTION_MODE}), using defaults:`, err);
       }
 
       if (isStale()) return;
 
-      const configuration = buildRtcConfiguration(stunServers);
-      log.ice(`P2P-only RTCPeerConnection (STUN, pool=${ICE_CANDIDATE_POOL_SIZE}, no TURN)`);
+      const configuration = buildRtcConfiguration(iceServers);
+      const turnCount = configuration.iceServers.filter((s) => {
+        const urls = Array.isArray(s.urls) ? s.urls : [s.urls];
+        return urls.some((u) => typeof u === "string" && (u.startsWith("turn:") || u.startsWith("turns:")));
+      }).length;
+      if (CONNECTION_MODE === "hybrid" && turnCount > 0) {
+        turnEscalatedRef.current = true;
+      }
+      log.ice(
+        CONNECTION_MODE === "hybrid"
+          ? `Hybrid RTCPeerConnection (STUN+TURN upfront, P2P preferred, pool=${ICE_CANDIDATE_POOL_SIZE}, turnEntries=${turnCount})`
+          : `P2P-only RTCPeerConnection (STUN, pool=${ICE_CANDIDATE_POOL_SIZE}, no TURN)`
+      );
       installTimelineGlobals();
 
       const pc = new RTCPeerConnection(configuration);
@@ -2431,9 +2647,11 @@ export default function CallManager({ user, debug }) {
       timelineBump("pcCreated");
       timelineLog("PC_CREATED", {
         generation,
-        mode: "p2p_only",
-        stunServerCount: configuration.iceServers.length,
+        mode: CONNECTION_MODE,
+        iceServerCount: configuration.iceServers.length,
+        turnEntryCount: turnCount,
         iceCandidatePoolSize: configuration.iceCandidatePoolSize,
+        continualGathering: configuration.continualGatheringPolicy,
       });
 
       pcRef.current = pc;
@@ -2574,6 +2792,8 @@ export default function CallManager({ user, debug }) {
       alert("⚠️ Connection lost. Please wait while we reconnect.");
       return;
     }
+    calleeIdRef.current = targetId;
+    await loadCallIntelligence(targetId);
     const needsVideo = type === "video" || type === "blind_date";
     try {
       const stream = await navigator.mediaDevices.getUserMedia(getMediaConstraints(needsVideo));
@@ -2857,7 +3077,13 @@ export default function CallManager({ user, debug }) {
                 </span>
               </div>
               <div style={styles.debugRow}><span>Recovery:</span><span>{recoveryAttemptsRef.current}/{MAX_RECOVERY_CYCLES}</span></div>
-              <div style={styles.debugRow}><span>TURN:</span><span>{turnEscalatedRef.current ? "Active" : "No"}</span></div>
+              <div style={styles.debugRow}><span>Mode:</span><span>{CONNECTION_MODE}</span></div>
+              <div style={styles.debugRow}>
+                <span>P2P Pred:</span>
+                <span>{connectionPredictionRef.current?.p2p_success_probability != null ? `${connectionPredictionRef.current.p2p_success_probability}%` : "—"}</span>
+              </div>
+              <div style={styles.debugRow}><span>TURN:</span><span>{turnEscalatedRef.current ? "In config" : "No"}</span></div>
+              <div style={styles.debugRow}><span>Route:</span><span>{turnFallbackOccurredRef.current ? "Relay" : "P2P"}</span></div>
               <div style={styles.debugRow}><span>Current Step:</span><span>{debugCurrentStep}</span></div>
               <div style={styles.debugRow}><span>Media Status:</span><span>{debugMediaStatus}</span></div>
               {callErrorMessage && <div style={styles.debugError}>⚠️ {callErrorMessage}</div>}

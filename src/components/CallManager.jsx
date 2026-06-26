@@ -26,12 +26,13 @@ const log = {
   error: (...a) => { console.error(`[WEBRTC][ERROR]`, { timestamp: new Date().toISOString(), detail: a }); },
 };
 
-// Phase 6 timing constants (tuned for India mobile networks)
-const DISCONNECT_GRACE_MS = 6000;  // wait before ICE restart on "disconnected"
-const ICE_RESTART_COOLDOWN = 8000;  // min gap between restarts
-const MAX_RECOVERY_CYCLES = 2;     // ICE restart attempts before TURN escalation
-const P2P_WATCHDOG_MS = 18000;     // try STUN-only P2P first, then add TURN (no SDP churn)
-const ALLOWED_OFFER_REASONS = new Set(["initial", "ice_restart_recovery", "turn_watchdog"]);
+// Phase 1 — Initial ICE stabilization (India IPv6 P2P: allow 45–60s for first connect)
+const DISCONNECT_GRACE_MS = 12000;         // post-connect: grace before recovery on disconnected
+const INITIAL_DISCONNECT_GRACE_MS = 20000; // initial ICE: monitor disconnected, do not restart early
+const INITIAL_ICE_TIMEOUT_MS = 60000;      // do not interrupt first O/A + ICE until this elapses
+const ICE_RESTART_COOLDOWN = 8000;         // min gap between post-connect restarts
+const MAX_RECOVERY_CYCLES = 2;             // ICE restart attempts before TURN escalation
+const ALLOWED_OFFER_REASONS = new Set(["initial", "ice_restart_recovery"]);
 
 const DEFAULT_STUN_SERVERS = [
   { urls: "stun:stun.l.google.com:19302" },
@@ -92,7 +93,7 @@ export default function CallManager({ user, debug }) {
   const initialNegotiationStartedRef = useRef(false);
   const initialNegotiationCompleteRef = useRef(false);
   const iceRestartInFlightRef = useRef(false);
-  const turnWatchdogRestartSentRef = useRef(false);
+  const initialIcePhaseExpiredRef = useRef(false);
   const appliedRemoteSdpKeysRef = useRef(new Set());
   const transceiversRef = useRef({ audio: null, video: null });
   const dataChannelRef = useRef(null);
@@ -109,7 +110,7 @@ export default function CallManager({ user, debug }) {
   const disconnectTimerRef = useRef(null); // 6s grace timer for "disconnected"
 
   // Phase 6 — TURN escalation state
-  const p2pTimeoutRef = useRef(null); // 15s P2P watchdog
+  const initialIceTimeoutRef = useRef(null); // 60s: first-connect patience window
   const failureDiagnosisTimeoutRef = useRef(null); // Phase 9 failure engine
   const turnEscalatedRef = useRef(false);
   const turnFallbackOccurredRef = useRef(false);
@@ -127,6 +128,8 @@ export default function CallManager({ user, debug }) {
 
   // Phase 7 — Candidate analytics
   const candidateCountsRef = useRef({ host: 0, srflx: 0, relay: 0 });
+  const localCandidateFamiliesRef = useRef({ ipv4: 0, ipv6: 0 });
+  const remoteCandidateFamiliesRef = useRef({ ipv4: 0, ipv6: 0 });
   const localCandidateTypesRef = useRef({});
   const remoteCandidateTypesRef = useRef({});
   const selectedCandidatePairRef = useRef(null);
@@ -170,6 +173,30 @@ export default function CallManager({ user, debug }) {
     if (!candidateStr) return null;
     const m = candidateStr.match(/typ\s+(\w+)/i);
     return m ? m[1].toLowerCase() : null;
+  };
+
+  const parseCandidateAddressFamily = (candidateStr) => {
+    if (!candidateStr) return "unknown";
+    const m = candidateStr.match(/candidate:\S+\s+\d+\s+\w+\s+\d+\s+([^\s]+)/);
+    if (!m) return "unknown";
+    return m[1].includes(":") ? "ipv6" : "ipv4";
+  };
+
+  const trackCandidateTelemetry = (candidateStr, direction) => {
+    const type = parseCandidateType(candidateStr);
+    const family = parseCandidateAddressFamily(candidateStr);
+    if (type) {
+      const typesRef = direction === "local" ? localCandidateTypesRef : remoteCandidateTypesRef;
+      typesRef.current[type] = (typesRef.current[type] || 0) + 1;
+      if (direction === "local") {
+        candidateCountsRef.current[type] = (candidateCountsRef.current[type] || 0) + 1;
+      }
+    }
+    if (family === "ipv4" || family === "ipv6") {
+      const familiesRef = direction === "local" ? localCandidateFamiliesRef : remoteCandidateFamiliesRef;
+      familiesRef.current[family] = (familiesRef.current[family] || 0) + 1;
+    }
+    return { type, family };
   };
 
   const dedupeIceServers = (servers) => {
@@ -222,10 +249,10 @@ export default function CallManager({ user, debug }) {
     webrtcPeerReadyRef.current = false;
   };
 
-  const buildRtcConfiguration = (iceServers, includeTurn) => ({
+  const buildRtcConfiguration = (iceServers) => ({
     iceServers: dedupeIceServers(iceServers),
     iceTransportPolicy: "all",
-    iceCandidatePoolSize: includeTurn ? 2 : 0,
+    iceCandidatePoolSize: 2,
     bundlePolicy: "max-bundle",
     rtcpMuxPolicy: "require",
   });
@@ -244,11 +271,11 @@ export default function CallManager({ user, debug }) {
 
   const isInitialIcePhase = () => {
     if (iceConnectedTimeRef.current > 0) return false;
-    const pc = pcRef.current;
-    if (!pc) return true;
-    return ["new", "checking"].includes(pc.iceConnectionState)
-      || pc.connectionState === "connecting";
+    if (initialIcePhaseExpiredRef.current) return false;
+    return true;
   };
+
+  const canInterruptInitialIce = () => !isInitialIcePhase();
 
   const markNegotiationComplete = () => {
     initialNegotiationCompleteRef.current = true;
@@ -257,6 +284,10 @@ export default function CallManager({ user, debug }) {
   };
 
   const tryRestartIceWithoutSdp = (reason) => {
+    if (!canInterruptInitialIce()) {
+      logWebRTC("ICE_RESTART_WITHOUT_SDP_BLOCKED", { reason, phase: "initial" });
+      return false;
+    }
     const pc = pcRef.current;
     if (!pc || typeof pc.restartIce !== "function") return false;
     try {
@@ -270,6 +301,10 @@ export default function CallManager({ user, debug }) {
   };
 
   const sendIceRestartOffer = async (reason) => {
+    if (!canInterruptInitialIce()) {
+      logWebRTC("SDP_OFFER_BLOCKED", { reason, detail: "initial_ice_phase" });
+      return false;
+    }
     const pc = pcRef.current;
     if (!pc || !isInitiatorRef.current || iceRestartInFlightRef.current) return false;
     if (isNegotiatingRef.current || pc.signalingState !== "stable") return false;
@@ -307,6 +342,10 @@ export default function CallManager({ user, debug }) {
   };
 
   const escalateToTurn = async () => {
+    if (!canInterruptInitialIce()) {
+      log.turn("TURN escalation deferred — initial ICE phase still running.");
+      return;
+    }
     const pc = pcRef.current;
     if (!pc || turnEscalatedRef.current) return;
 
@@ -317,10 +356,7 @@ export default function CallManager({ user, debug }) {
     try {
       const res = await callAPI.getIceServers(false, false);
       const turnServers = mapIceServersFromApi(res?.iceServers);
-      const fullConfig = buildRtcConfiguration(
-        [...DEFAULT_STUN_SERVERS, ...turnServers],
-        true,
-      );
+      const fullConfig = buildRtcConfiguration([...DEFAULT_STUN_SERVERS, ...turnServers]);
       pc.setConfiguration(fullConfig);
       log.turn("TURN servers applied via setConfiguration.");
     } catch (err) {
@@ -328,24 +364,43 @@ export default function CallManager({ user, debug }) {
     }
   };
 
-  const startP2pWatchdog = () => {
-    if (p2pTimeoutRef.current) clearTimeout(p2pTimeoutRef.current);
-    p2pTimeoutRef.current = setTimeout(async () => {
+  const beginInitialIceRecovery = async () => {
+    const pc = pcRef.current;
+    if (!pc) return;
+    const ice = pc.iceConnectionState;
+    if (ice === "connected" || ice === "completed") return;
+
+    logWebRTC("INITIAL_ICE_RECOVERY_START", {
+      iceState: ice,
+      connectionState: pc.connectionState,
+      elapsedMs: Date.now() - connectionStartTimeRef.current,
+    });
+
+    if (!turnEscalatedRef.current) await escalateToTurn();
+    if (tryRestartIceWithoutSdp("initial_timeout")) return;
+    if (isInitiatorRef.current) {
+      await sendIceRestartOffer("ice_restart_recovery");
+    }
+  };
+
+  const startInitialIceMonitor = () => {
+    if (initialIceTimeoutRef.current) clearTimeout(initialIceTimeoutRef.current);
+    initialIceTimeoutRef.current = setTimeout(async () => {
       const pc = pcRef.current;
-      if (!pc || turnWatchdogRestartSentRef.current) return;
-      const ice = pc.iceConnectionState;
-      if (ice === "connected" || ice === "completed") return;
+      if (!pc) return;
+      if (iceConnectedTimeRef.current > 0) return;
 
-      log.turn(`P2P watchdog expired (${P2P_WATCHDOG_MS}ms) — adding TURN without SDP loop.`);
-      turnWatchdogRestartSentRef.current = true;
-      await escalateToTurn();
-
-      if (tryRestartIceWithoutSdp("turn_watchdog")) return;
-
-      if (isInitiatorRef.current) {
-        await sendIceRestartOffer("turn_watchdog");
-      }
-    }, P2P_WATCHDOG_MS);
+      initialIcePhaseExpiredRef.current = true;
+      logWebRTC("INITIAL_ICE_TIMEOUT", {
+        elapsedMs: INITIAL_ICE_TIMEOUT_MS,
+        iceState: pc.iceConnectionState,
+        connectionState: pc.connectionState,
+        localCandidates: { ...candidateCountsRef.current },
+        localFamilies: { ...localCandidateFamiliesRef.current },
+        remoteFamilies: { ...remoteCandidateFamiliesRef.current },
+      });
+      await beginInitialIceRecovery();
+    }, INITIAL_ICE_TIMEOUT_MS);
   };
 
   const handleAddExtraMinutes = async (minutes = 60) => {
@@ -673,7 +728,7 @@ export default function CallManager({ user, debug }) {
   // Phase 9 — TURN escalation timer management (clear on reuse)
   // ───────────────────────────────────────────────────────────────────────────
   const clearAllTimers = () => {
-    if (p2pTimeoutRef.current) { clearTimeout(p2pTimeoutRef.current); p2pTimeoutRef.current = null; }
+    if (initialIceTimeoutRef.current) { clearTimeout(initialIceTimeoutRef.current); initialIceTimeoutRef.current = null; }
     if (disconnectTimerRef.current) { clearTimeout(disconnectTimerRef.current); disconnectTimerRef.current = null; }
     if (failureDiagnosisTimeoutRef.current) { clearTimeout(failureDiagnosisTimeoutRef.current); failureDiagnosisTimeoutRef.current = null; }
   };
@@ -987,8 +1042,11 @@ export default function CallManager({ user, debug }) {
       ice_completion_time: gatheringTime,
       local_candidate_types: localCandidateTypesRef.current,
       remote_candidate_types: remoteCandidateTypesRef.current,
+      local_candidate_families: localCandidateFamiliesRef.current,
+      remote_candidate_families: remoteCandidateFamiliesRef.current,
       selected_local_candidate_type: selectedCandidatePairRef.current?.localType || null,
       selected_remote_candidate_type: selectedCandidatePairRef.current?.remoteType || null,
+      p2p_success: iceConnectedTimeRef.current > 0 && !turnFallbackOccurredRef.current,
       turn_fallback_occurrence: turnFallbackOccurredRef.current,
       average_rtt: rttAverageRef.current > 0 ? rttAverageRef.current : null,
       max_rtt: maxRttRef.current > 0 ? maxRttRef.current : null,
@@ -1027,10 +1085,14 @@ export default function CallManager({ user, debug }) {
     const pc = pcRef.current;
     if (!pc) return;
 
-    if (isInitialIcePhase()) {
-      log.restart("Skipping ICE restart — initial connectivity checks still running.");
-      if (!turnEscalatedRef.current) await escalateToTurn();
-      tryRestartIceWithoutSdp("initial_phase_recovery");
+    if (!canInterruptInitialIce()) {
+      log.restart("ICE restart blocked — initial negotiation must complete without interruption.");
+      return;
+    }
+
+    const iceState = pc.iceConnectionState;
+    if (["checking", "connected", "completed"].includes(iceState)) {
+      log.restart(`ICE restart blocked — state is ${iceState}.`);
       return;
     }
 
@@ -1084,6 +1146,14 @@ export default function CallManager({ user, debug }) {
     };
 
     pc.onnegotiationneeded = () => {
+      const ice = pc.iceConnectionState;
+      if (ice === "connected" || ice === "completed") {
+        logWebRTC("NEGOTIATION_NEEDED_IGNORED", {
+          reason: "already_connected",
+          iceState: ice,
+        });
+        return;
+      }
       logWebRTC("NEGOTIATION_NEEDED_IGNORED", {
         signalingState: pc.signalingState,
         initialComplete: initialNegotiationCompleteRef.current,
@@ -1118,6 +1188,7 @@ export default function CallManager({ user, debug }) {
             candidateCountsRef.current.srflx +
             candidateCountsRef.current.relay,
           breakdown: { ...candidateCountsRef.current },
+          families: { ...localCandidateFamiliesRef.current },
         });
       }
     };
@@ -1149,8 +1220,9 @@ export default function CallManager({ user, debug }) {
           setCallErrorMessage(null);
           recoveryAttemptsRef.current = 0;
           isRecoveringRef.current = false;
-          if (p2pTimeoutRef.current) { clearTimeout(p2pTimeoutRef.current); p2pTimeoutRef.current = null; }
+          if (initialIceTimeoutRef.current) { clearTimeout(initialIceTimeoutRef.current); initialIceTimeoutRef.current = null; }
           if (disconnectTimerRef.current) { clearTimeout(disconnectTimerRef.current); disconnectTimerRef.current = null; }
+          initialIcePhaseExpiredRef.current = true;
           startStatsLoop();
 
           // ── Receiver-track recovery (CALLER BLACK SCREEN FIX) ────────────────
@@ -1193,32 +1265,34 @@ export default function CallManager({ user, debug }) {
           }, 1500);
           break;
 
-        case "disconnected":
-          if (isInitialIcePhase()) return;
-          transitionRTCState("RECONNECTING", { iceState: state });
-          logWebRTC("ICE_DISCONNECTED", { graceMs: DISCONNECT_GRACE_MS });
+        case "disconnected": {
+          const graceMs = isInitialIcePhase() ? INITIAL_DISCONNECT_GRACE_MS : DISCONNECT_GRACE_MS;
+          logWebRTC("ICE_DISCONNECTED", { graceMs, initialPhase: isInitialIcePhase(), elapsedMs });
           setIsReconnecting(true);
           if (disconnectTimerRef.current) clearTimeout(disconnectTimerRef.current);
           disconnectTimerRef.current = setTimeout(async () => {
-            if (!pcRef.current || isInitialIcePhase()) return;
+            if (!pcRef.current) return;
             const currentState = pcRef.current.iceConnectionState;
-            if (currentState === "disconnected" || currentState === "failed") {
-              logWebRTC("ICE_GRACE_EXPIRED", { currentState });
-              await restartIceClean();
-            } else {
+            if (currentState === "connected" || currentState === "completed") {
               logWebRTC("ICE_SELF_RECOVERED", { currentState });
               setIsReconnecting(false);
+              return;
             }
-          }, DISCONNECT_GRACE_MS);
+            logWebRTC("ICE_DISCONNECTED_GRACE_ELAPSED", {
+              currentState,
+              initialPhase: isInitialIcePhase(),
+            });
+            if (!canInterruptInitialIce()) return;
+            transitionRTCState("RECONNECTING", { iceState: currentState });
+            await restartIceClean();
+          }, graceMs);
           break;
+        }
 
         case "failed":
           logWebRTC("ICE_FAILED", { elapsedMs, initialPhase: isInitialIcePhase() });
-          if (isInitialIcePhase()) {
-            void (async () => {
-              if (!turnEscalatedRef.current) await escalateToTurn();
-              tryRestartIceWithoutSdp("initial_ice_failed");
-            })();
+          if (!canInterruptInitialIce()) {
+            setIsReconnecting(true);
             break;
           }
           transitionRTCState("RECONNECTING", { iceState: state });
@@ -1253,7 +1327,7 @@ export default function CallManager({ user, debug }) {
       }
       if (state === "failed") {
         logWebRTC("DTLS_FAILED", { elapsedMs, initialPhase: isInitialIcePhase() });
-        if (isInitialIcePhase()) return;
+        if (!canInterruptInitialIce()) return;
         transitionRTCState("RECONNECTING", { connectionState: state });
         setCallErrorMessage("Connection failed. Recovering...");
         restartIceClean();
@@ -1274,28 +1348,26 @@ export default function CallManager({ user, debug }) {
           logWebRTC("ICE_CANDIDATE_LOCAL_IGNORED", { reason: "malformed_local_candidate" });
           return;
         }
-        // Phase 3: send immediately — NEVER wait for gatheringState === "complete"
-        const type = parseCandidateType(event.candidate.candidate);
-        if (type) {
-          candidateCountsRef.current[type] = (candidateCountsRef.current[type] || 0) + 1;
-          localCandidateTypesRef.current[type] = (localCandidateTypesRef.current[type] || 0) + 1;
-        }
-        // Phase 10 — direct send, logged before sendSignaling to prove no buffering
+        const { type, family } = trackCandidateTelemetry(event.candidate.candidate, "local");
         logWebRTC("ICE_CANDIDATE_LOCAL_SENT", {
           type: type || "unknown",
+          family,
           candidate: event.candidate.candidate?.substring(0, 80),
           sdpMid: event.candidate.sdpMid,
           totalSent: (candidateCountsRef.current.host || 0) +
             (candidateCountsRef.current.srflx || 0) +
             (candidateCountsRef.current.relay || 0),
+          families: { ...localCandidateFamiliesRef.current },
         });
         sendSignaling({ action: "ice_candidate", candidate: serialized });
       } else {
         logWebRTC("ICE_GATHERING_NULL_CANDIDATE", {
           meaning: "local gathering complete",
           breakdown: { ...candidateCountsRef.current },
+          families: { ...localCandidateFamiliesRef.current },
         });
         iceGatheringEndTimeRef.current = iceGatheringEndTimeRef.current || Date.now();
+        sendSignaling({ action: "ice_candidate", candidate: null });
       }
     };
   };
@@ -1576,19 +1648,18 @@ export default function CallManager({ user, debug }) {
           }
           processedRemoteCandidatesRef.current.add(candidateKey);
 
-          const type = parseCandidateType(candStr);
-          if (type) {
-            remoteCandidateTypesRef.current[type] = (remoteCandidateTypesRef.current[type] || 0) + 1;
-          }
+          const { type, family } = trackCandidateTelemetry(candStr, "remote");
 
           if (pcRef.current && remoteDescriptionAppliedRef.current) {
             try {
-              trace("ICE", "candidate applied", { type: type || "unknown", sdpMid: msg.candidate.sdpMid });
+              trace("ICE", "candidate applied", { type: type || "unknown", family, sdpMid: msg.candidate.sdpMid });
               logWebRTC("ICE_CANDIDATE_REMOTE_APPLIED", {
                 type: type || "unknown",
+                family,
                 candidate: candStr.substring(0, 80),
                 sdpMid: msg.candidate.sdpMid,
                 drained: false,
+                families: { ...remoteCandidateFamiliesRef.current },
               });
               await pcRef.current.addIceCandidate(new RTCIceCandidate(msg.candidate));
             } catch (err) {
@@ -1598,6 +1669,7 @@ export default function CallManager({ user, debug }) {
             trace("ICE", "candidate queued", { type: type || "unknown", sdpMid: msg.candidate.sdpMid });
             logWebRTC("ICE_CANDIDATE_REMOTE_QUEUED", {
               type: type || "unknown",
+              family,
               candidate: candStr.substring(0, 80),
               sdpMid: msg.candidate.sdpMid,
             });
@@ -1927,7 +1999,7 @@ export default function CallManager({ user, debug }) {
   // ───────────────────────────────────────────────────────────────────────────
   // Main WebRTC setup
   // Phase 2 — RTCPeerConnection config
-  // Phase 6A — P2P primary attempt with 15s watchdog
+  // Phase 1 — STUN-only P2P first; 60s patience before any recovery interrupt
   // ───────────────────────────────────────────────────────────────────────────
   const setupWebRTCPeer = async (isInitiator, generation) => {
     const isStale = () => generation !== webrtcSetupGenerationRef.current
@@ -1945,8 +2017,8 @@ export default function CallManager({ user, debug }) {
     negotiationQueuedRef.current = false;
     initialNegotiationStartedRef.current = false;
     initialNegotiationCompleteRef.current = false;
+    initialIcePhaseExpiredRef.current = false;
     iceRestartInFlightRef.current = false;
-    turnWatchdogRestartSentRef.current = false;
     negotiationChainRef.current = Promise.resolve();
     transceiversRef.current = { audio: null, video: null };
     dataChannelRef.current = null;
@@ -1973,6 +2045,8 @@ export default function CallManager({ user, debug }) {
 
     // Quality telemetry reset
     candidateCountsRef.current = { host: 0, srflx: 0, relay: 0 };
+    localCandidateFamiliesRef.current = { ipv4: 0, ipv6: 0 };
+    remoteCandidateFamiliesRef.current = { ipv4: 0, ipv6: 0 };
     localCandidateTypesRef.current = {};
     remoteCandidateTypesRef.current = {};
     selectedCandidatePairRef.current = null;
@@ -2002,8 +2076,8 @@ export default function CallManager({ user, debug }) {
 
       if (isStale()) return;
 
-      const configuration = buildRtcConfiguration(stunServers, false);
-      log.ice("Initialising RTCPeerConnection (STUN-only phase, P2P preferred)");
+      const configuration = buildRtcConfiguration(stunServers);
+      log.ice("Initialising RTCPeerConnection (STUN-only, pool=2, 60s initial ICE patience)");
 
       const pc = new RTCPeerConnection(configuration);
       if (isStale()) {
@@ -2066,7 +2140,7 @@ export default function CallManager({ user, debug }) {
 
       webrtcPeerReadyRef.current = true;
       await processSignalingQueue();
-      startP2pWatchdog();
+      startInitialIceMonitor();
     } catch (err) {
       log.error("setupWebRTCPeer fatal error:", err);
       if (generation === webrtcSetupGenerationRef.current) {
@@ -2241,8 +2315,8 @@ export default function CallManager({ user, debug }) {
     negotiationQueuedRef.current = false;
     initialNegotiationStartedRef.current = false;
     initialNegotiationCompleteRef.current = false;
+    initialIcePhaseExpiredRef.current = false;
     iceRestartInFlightRef.current = false;
-    turnWatchdogRestartSentRef.current = false;
     transceiversRef.current = { audio: null, video: null };
     dataChannelRef.current = null;
     transitionRTCState("IDLE");

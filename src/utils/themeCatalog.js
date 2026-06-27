@@ -11,6 +11,10 @@ export const BACKGROUND_PATTERNS = {
   B01: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 800 800'%3E%3Cpath fill='%230b1b3d' d='M0 0h800v800H0z'/%3E%3Cpath fill='%231a3b7c' d='M0 800c40-100 120-200 160-320S200 200 400 0h400v800z'/%3E%3Cpath fill='%232a5ab5' d='M100 800c40-150 80-250 120-350S300 200 500 0h300v800z'/%3E%3C/svg%3E")`,
   B02: `radial-gradient(circle at center, #1b4b5e 0%, #0d2b38 100%), repeating-radial-gradient(circle at center, transparent 0, #1b4b5e 10px, transparent 15px, #266b85 20px, transparent 25px)`,
   B03: "radial-gradient(circle at 50% 50%, #064048 0%, #001214 100%), repeating-radial-gradient(circle at 0 0, transparent 0, #001214 20px, transparent 21px, #00D4AA 22px, transparent 23px)",
+  B04: "linear-gradient(135deg, #0f172a 0%, #064e3b 100%)",
+  B05: "radial-gradient(circle at top right, #334155, #0f172a)",
+  B06: "repeating-linear-gradient(45deg, #000 0, #000 10px, #111 10px, #111 20px)",
+  B07: "linear-gradient(to bottom, #fdf4ff, #fae8ff)",
 };
 
 const VARIANT_ACCENTS = {
@@ -27,6 +31,12 @@ const VARIANT_ACCENTS = {
   rose: "#fb7185",
   slate: "#64748b",
   amber: "#f59e0b",
+  cyan: "#06b6d4",
+  magenta: "#d946ef",
+  lime: "#84cc16",
+  peach: "#fdba74",
+  lavender: "#c084fc",
+  mint: "#6ee7b7",
 };
 
 export function resolveThemeStyles(theme) {

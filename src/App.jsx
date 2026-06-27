@@ -100,8 +100,8 @@ export default function App() {
   const checkOnboarding = async () => {
     try {
       const profile = await profileAPI.getMyProfile();
-      // If profile is missing basic fields, send to onboarding
-      if (profile && profile.username && profile.gender) {
+      // Profile must be discoverable before entering the app feed
+      if (profile?.is_discoverable) {
         setScreen("app");
         setShowMood(true);
       } else {

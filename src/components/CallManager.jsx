@@ -50,7 +50,6 @@ const DEFAULT_STUN_SERVERS = [
   { urls: "stun:stun1.l.google.com:19302" },
   { urls: "stun:stun2.l.google.com:19302" },
   { urls: "stun:stun.cloudflare.com:3478" },
-  { urls: "stun:[2001:4860:4864:5:8000::1]:19302" },
 ];
 
 // Canonical per-call lifecycle steps (logged in order with seq + callId)
@@ -442,10 +441,19 @@ export default function CallManager({ user, debug }) {
   const dedupeIceServers = (servers) => {
     const seen = new Set();
     return servers.filter((server) => {
-      const urls = Array.isArray(server.urls) ? server.urls.join("|") : String(server.urls || "");
+      let urlsArray = Array.isArray(server.urls) ? server.urls : [server.urls].filter(Boolean);
+      
+      // Do not include IPv6 STUN servers if IPv6 isn't available
+      if (!localIpv6AvailableRef.current) {
+        urlsArray = urlsArray.filter(u => typeof u === "string" && !u.includes("2001:4860"));
+      }
+      
+      if (urlsArray.length === 0) return false;
+      const urls = urlsArray.join("|");
       const key = `${urls}|${server.username || ""}`;
-      if (!urls || seen.has(key)) return false;
+      if (seen.has(key)) return false;
       seen.add(key);
+      server.urls = urlsArray.length === 1 ? urlsArray[0] : urlsArray;
       return true;
     });
   };

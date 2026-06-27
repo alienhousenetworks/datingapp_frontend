@@ -50,6 +50,7 @@ const DEFAULT_STUN_SERVERS = [
   { urls: "stun:stun1.l.google.com:19302" },
   { urls: "stun:stun2.l.google.com:19302" },
   { urls: "stun:stun.cloudflare.com:3478" },
+  { urls: "stun:[2001:4860:4864:5:8000::1]:19302" },
 ];
 
 // Canonical per-call lifecycle steps (logged in order with seq + callId)
@@ -159,6 +160,8 @@ export default function CallManager({ user, debug }) {
   const adaptiveIceTimeoutMsRef = useRef(INITIAL_ICE_TIMEOUT_MS);
   const iceCandidatePoolSizeRef = useRef(ICE_CANDIDATE_POOL_SIZE);
   const connectionPredictionRef = useRef(null);
+  const preferIpv6Ref = useRef(false);
+  const localIpv6AvailableRef = useRef(false);
   const calleeIdRef = useRef("");
   const lastReportedIceStateRef = useRef("");
   const networkProbeRunningRef = useRef(false);
@@ -406,11 +409,17 @@ export default function CallManager({ user, debug }) {
     return m ? m[1].toLowerCase() : null;
   };
 
+  const isIpv6Address = (address) => {
+    if (!address || typeof address !== "string") return false;
+    const normalized = address.split("%")[0];
+    return normalized.includes(":") && !/^\d+\.\d+\.\d+\.\d+$/.test(normalized);
+  };
+
   const parseCandidateAddressFamily = (candidateStr) => {
     if (!candidateStr) return "unknown";
     const m = candidateStr.match(/candidate:\S+\s+\d+\s+\w+\s+\d+\s+([^\s]+)/);
     if (!m) return "unknown";
-    return m[1].includes(":") ? "ipv6" : "ipv4";
+    return isIpv6Address(m[1]) ? "ipv6" : "ipv4";
   };
 
   const trackCandidateTelemetry = (candidateStr, direction) => {
@@ -453,7 +462,9 @@ export default function CallManager({ user, debug }) {
   const filterStunOnlyIceServers = (servers) => (
     (servers || []).flatMap((server) => {
       const urls = Array.isArray(server.urls) ? server.urls : [server.urls];
-      const stunUrls = urls.filter((u) => typeof u === "string" && u.startsWith("stun:"));
+      const stunUrls = urls.filter(
+        (u) => typeof u === "string" && (u.startsWith("stun:") || u.startsWith("stuns:")),
+      );
       if (!stunUrls.length) return [];
       return [{ urls: stunUrls.length === 1 ? stunUrls[0] : stunUrls }];
     })
@@ -534,16 +545,21 @@ export default function CallManager({ user, debug }) {
         iceCandidatePoolSize: 4,
       });
       const counts = { host: 0, srflx: 0, relay: 0 };
-      let ipv6 = false;
+      let ipv6HostCandidates = 0;
+      let hasIpv6 = false;
       const gatherStart = Date.now();
       probePc.onicecandidate = (event) => {
         if (!event.candidate?.candidate) return;
         const c = event.candidate.candidate;
-        if (c.includes("typ host")) counts.host += 1;
+        const addr = c.split(" ")[4] || "";
+        const family = isIpv6Address(addr) ? "ipv6" : "ipv4";
+        if (c.includes("typ host")) {
+          counts.host += 1;
+          if (family === "ipv6") ipv6HostCandidates += 1;
+        }
         if (c.includes("typ srflx")) counts.srflx += 1;
         if (c.includes("typ relay")) counts.relay += 1;
-        const addr = c.split(" ")[4] || "";
-        if (addr.includes(":") && !/^\d+\.\d+\.\d+\.\d+$/.test(addr)) ipv6 = true;
+        if (family === "ipv6") hasIpv6 = true;
       };
       probePc.createDataChannel("network_probe");
       const offer = await probePc.createOffer();
@@ -553,7 +569,9 @@ export default function CallManager({ user, debug }) {
       const env = detectClientEnvironment();
       const profile = {
         ipv4: counts.host > 0 || counts.srflx > 0,
-        ipv6,
+        ipv6: hasIpv6,
+        has_ipv6: hasIpv6,
+        ipv6_host_candidates: ipv6HostCandidates,
         host_candidates: counts.host,
         srflx_candidates: counts.srflx,
         relay_candidates: counts.relay,
@@ -564,8 +582,13 @@ export default function CallManager({ user, debug }) {
         transport: "UDP",
         connection_type: env.connectionType,
       };
+      localIpv6AvailableRef.current = hasIpv6;
       const result = await callAPI.submitNetworkProfile(profile);
-      logWebRTC("NETWORK_PROFILE_UPLOADED", { ...profile, nat: result?.likely_nat_type });
+      logWebRTC("NETWORK_PROFILE_UPLOADED", {
+        ...profile,
+        nat: result?.likely_nat_type,
+        ipv6_available: result?.ipv6_available,
+      });
     } catch (err) {
       log.warn("Network probe failed:", err);
     } finally {
@@ -579,6 +602,9 @@ export default function CallManager({ user, debug }) {
       const prediction = await callAPI.getConnectionPrediction(peerId);
       connectionPredictionRef.current = prediction;
       const adaptive = prediction?.adaptive_ice;
+      preferIpv6Ref.current = Boolean(
+        prediction?.prefer_ipv6 || adaptive?.prefer_ipv6,
+      );
       if (adaptive) {
         adaptiveIceTimeoutMsRef.current = adaptive.initial_ice_timeout_ms || INITIAL_ICE_TIMEOUT_MS;
         iceCandidatePoolSizeRef.current = adaptive.ice_candidate_pool_size || ICE_CANDIDATE_POOL_SIZE;
@@ -588,6 +614,10 @@ export default function CallManager({ user, debug }) {
         p2p_probability: prediction?.p2p_success_probability,
         turn_recommended: prediction?.turn_recommended,
         expected_ice_seconds: prediction?.expected_ice_seconds,
+        prefer_ipv6: preferIpv6Ref.current,
+        caller_has_ipv6: prediction?.caller_has_ipv6,
+        callee_has_ipv6: prediction?.callee_has_ipv6,
+        likely_transport: prediction?.likely_transport,
         adaptive,
       });
     } catch (err) {
@@ -1358,12 +1388,17 @@ export default function CallManager({ user, debug }) {
         const rType = remoteCand.candidateType || parseCandidateType(remoteCand.candidate);
         const lip = localCand.ip || localCand.address || '';
         const rip = remoteCand.ip || remoteCand.address || '';
+        const localFamily = isIpv6Address(lip) ? "ipv6" : "ipv4";
+        const remoteFamily = isIpv6Address(rip) ? "ipv6" : "ipv4";
         selectedCandidatePairRef.current = {
           localType: lType,
           remoteType: rType,
           protocol: localCand.protocol || selectedPair.protocol,
           localIp: lip,
           remoteIp: rip,
+          localFamily,
+          remoteFamily,
+          pathFamily: localFamily === "ipv6" && remoteFamily === "ipv6" ? "ipv6" : "ipv4",
         };
         // Phase 7 — detect TURN usage from active pair
         if (lType === "relay" || rType === "relay") {
@@ -1382,6 +1417,10 @@ export default function CallManager({ user, debug }) {
         logWebRTC("CANDIDATE_PAIR_ANALYSIS", {
           localCandidateType: lType || "unknown",
           remoteCandidateType: rType || "unknown",
+          localFamily,
+          remoteFamily,
+          pathFamily: selectedCandidatePairRef.current.pathFamily,
+          preferIpv6: preferIpv6Ref.current,
           protocol: localCand.protocol || selectedPair.protocol || "unknown",
           nominated: selectedPair.nominated,
           state: selectedPair.state,
@@ -1481,6 +1520,8 @@ export default function CallManager({ user, debug }) {
         selectedCandidatePairRef.current.remoteType,
       )
       : "unknown";
+    const pathFamily = selectedCandidatePairRef.current?.pathFamily || "unknown";
+    const connectionType = pathFamily === "ipv6" ? `${route}-ipv6` : route;
 
     // Phase 7 — full analytics payload
     const payload = {
@@ -1502,12 +1543,15 @@ export default function CallManager({ user, debug }) {
       average_jitter: jitterAverageRef.current > 0 ? jitterAverageRef.current : null,
       average_bitrate_kbps: avgBitrate,
       recovery_attempts: recoveryAttemptsRef.current,
-      connection_type: route,
+      connection_type: connectionType,
       connection_establishment_ms: establishmentTime ? establishmentTime * 1000 : null,
       max_packet_loss: maxPacketLossRef.current,
       turn_fallback_count: turnFallbackOccurredRef.current ? 1 : 0,
       // Extended Phase 7 fields
       fallback_used: turnEscalatedRef.current,
+      failure_reason: pathFamily === "ipv6"
+        ? "ipv6_path"
+        : (preferIpv6Ref.current ? "ipv4_path_despite_dual_ipv6" : ""),
       ice_connected_at_ms: iceConnectedTimeRef.current > 0
         ? iceConnectedTimeRef.current - callStartTimeRef.current : null,
       first_media_received_at_ms: firstMediaReceivedTimeRef.current > 0
@@ -2616,6 +2660,14 @@ export default function CallManager({ user, debug }) {
         if (res?.iceCandidatePoolSize) {
           iceCandidatePoolSizeRef.current = res.iceCandidatePoolSize;
         }
+        if (res?.ipv6_available) {
+          localIpv6AvailableRef.current = true;
+        }
+        logWebRTC("ICE_SERVERS_LOADED", {
+          serverCount: iceServers.length,
+          ipv6_available: Boolean(res?.ipv6_available),
+          prefer_ipv6: preferIpv6Ref.current || Boolean(res?.prefer_ipv6),
+        });
       } catch (err) {
         log.error(`Failed to fetch ICE servers (mode=${CONNECTION_MODE}), using defaults:`, err);
       }

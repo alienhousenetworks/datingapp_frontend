@@ -2,6 +2,7 @@ import React, { useState, useEffect } from "react";
 import ChatWindow from "../components/ChatWindow";
 import { chatAPI } from "../api";
 import chatStyles from "../styles/ChatPage.module.css";
+import { getUserDisplayName, getUserInitial } from "../utils/userDisplay";
 
 const COLORS = [
   "#FF1F6B",
@@ -69,7 +70,7 @@ export default function ChatPage({ initialMatch }) {
     await loadConversations(false);
   };
 
-  const getInitial = (user) => user?.email?.[0]?.toUpperCase() || "?";
+  const getInitial = getUserInitial;
 
   const formatTime = (iso) => {
     if (!iso) return "";
@@ -126,7 +127,7 @@ export default function ChatPage({ initialMatch }) {
                           color: active ? "var(--pink-soft)" : "var(--white)",
                         }}
                       >
-                        {user.email?.split("@")[0] || "Match"}
+                        {getUserDisplayName(user)}
                       </div>
                       <div style={styles.convoMsg}>
                         {c.last_message?.content?.text || "Say hello 👋"}

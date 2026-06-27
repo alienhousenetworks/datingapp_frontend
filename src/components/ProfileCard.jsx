@@ -6,7 +6,7 @@ export default function ProfileCard({ profile, onLike, onPass, onView }) {
   const themeStyles = resolveThemeStyles(profile.theme);
   const tags = profile.tags || [];
   const prompts = profile.prompts || [];
-  const initial = profile.name?.[0]?.toUpperCase() || profile.letter || "?";
+  const initial = profile.username?.[0]?.toUpperCase() || profile.letter || "?";
 
   return (
     <div
@@ -31,7 +31,7 @@ export default function ProfileCard({ profile, onLike, onPass, onView }) {
         {profile.images?.[0]?.image_url ? (
           <img
             src={profile.images[0].image_url}
-            alt={profile.name}
+            alt={profile.username || "profile"}
             style={{
               position: "absolute",
               inset: 0,
@@ -74,7 +74,7 @@ export default function ProfileCard({ profile, onLike, onPass, onView }) {
       {/* Info */}
       <div style={styles.info}>
         <div style={styles.nameRow}>
-          <span style={styles.name}>{profile.name || "Unknown"}</span>
+          <span style={styles.name}>{profile.username ? `@${profile.username}` : "Unknown"}</span>
           <span style={styles.agePill}>{profile.age}</span>
         </div>
         <div style={styles.sub}>

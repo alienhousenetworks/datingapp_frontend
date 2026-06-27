@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect } from "react";
 import { chatAPI, getValidAccessToken, wsURL, API_BASE_URL, authAPI } from "../api";
+import { getUserDisplayName, getUserInitial } from "../utils/userDisplay";
 
 const getAbsoluteMediaUrl = (url) => {
   if (!url) return null;
@@ -678,8 +679,8 @@ export default function ChatWindow({ conversation, onDeleteConversation }) {
   }
 
   const other = conversation.other_user || {};
-  const initial = other.email?.[0]?.toUpperCase() || "?";
-  const name = other.email?.split("@")[0] || "Match";
+  const initial = getUserInitial(other);
+  const name = getUserDisplayName(other);
   const color = getColor(0);
 
   return (
@@ -880,7 +881,7 @@ export default function ChatWindow({ conversation, onDeleteConversation }) {
                         <span
                           key={r.id || ri}
                           style={styles.reactionBadge}
-                          title={`Reacted by ${r.user?.email || "User"}`}
+                          title={`Reacted by ${getUserDisplayName(r.user)}`}
                           onClick={() => handleEmojiSelect(m.id, r.emoji)}
                         >
                           {r.emoji}
@@ -1006,7 +1007,7 @@ export default function ChatWindow({ conversation, onDeleteConversation }) {
         <div style={styles.mediaOverlay}>
           <div style={styles.mediaOverlayHeader}>
             <div style={styles.mediaOverlayTitle}>
-              🔒 Private Media from {other.email?.split("@")[0] || "Match"}
+              🔒 Private Media from {getUserDisplayName(other)}
             </div>
             {mediaCountdown !== null && (
               <div style={styles.mediaTimer}>
@@ -1026,7 +1027,7 @@ export default function ChatWindow({ conversation, onDeleteConversation }) {
             {/* Security watermarks */}
             <div style={styles.watermarkDiagonal}>
               <div style={styles.watermarkText}>
-                {other.email || "CONFIDENTIAL"}
+                {getUserDisplayName(other)}
               </div>
             </div>
 

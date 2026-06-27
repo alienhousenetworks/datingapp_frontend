@@ -112,7 +112,7 @@ const MobileFeedCard = ({ profile, handleLike, setFullScreenImage, themeStyles, 
                     <img
                       className={feedCss.mobileHeroImg}
                       src={img.image_url}
-                      alt={profile.name}
+                      alt={profile.username ? `@${profile.username}` : "Unknown"}
                       onClick={(e) => {
                         // Prevent click if we dragged
                         if (touchStartRef.current !== null && Math.abs(e.clientX - touchStartRef.current) > 10) {
@@ -129,7 +129,7 @@ const MobileFeedCard = ({ profile, handleLike, setFullScreenImage, themeStyles, 
               </div>
             ) : (
               <div className={feedCss.mobileHeroPlaceholder}>
-                {profile.name?.[0]?.toUpperCase() || "?"}
+                {profile.username?.[0]?.toUpperCase() || "?"}
               </div>
             )}
             
@@ -157,7 +157,7 @@ const MobileFeedCard = ({ profile, handleLike, setFullScreenImage, themeStyles, 
 
         <div className={feedCss.mobileInfoCenter}>
           <h2 className={feedCss.mobileFunkyName}>
-            {(profile.name || "Unknown").toUpperCase()}, {profile.age} {profile.gender === 'female' ? 'F' : profile.gender === 'male' ? 'M' : ''}
+            {(profile.username ? `@${profile.username}` : "Unknown").toUpperCase()}, {profile.age} {profile.gender === 'female' ? 'F' : profile.gender === 'male' ? 'M' : ''}
           </h2>
           <div className={feedCss.mobileHandwrittenRow}>
             <span>{[profile.city, profile.distance_km != null ? `${profile.distance_km} KM` : null].filter(Boolean).join(", ")}</span>
@@ -204,7 +204,7 @@ const PolaroidLayout = ({ profile, handleLike, setFullScreenImage, themeStyles, 
           {profile.images?.[0]?.image_url ? (
             <img
               src={profile.images[0].image_url}
-              alt={profile.name}
+              alt={profile.username ? `@${profile.username}` : "Unknown"}
               style={polaroidStyles.image}
               onClick={() => setFullScreenImage(profile.images[0].image_url)}
               onError={(e) => { e.target.style.display = "none"; }}
@@ -220,7 +220,7 @@ const PolaroidLayout = ({ profile, handleLike, setFullScreenImage, themeStyles, 
       </div>
       
       <div style={polaroidStyles.infoBox}>
-        <h2 style={polaroidStyles.name}>{profile.name}</h2>
+        <h2 style={polaroidStyles.name}>{profile.username ? `@${profile.username}` : "Unknown"}</h2>
         <div style={polaroidStyles.metaTags}>
           <span style={polaroidStyles.tag}>{getGenderLabel(profile)}</span>
           <span style={polaroidStyles.tag}>{getSexualityLabel(profile)}</span>
@@ -344,7 +344,7 @@ const ElegantLayout = ({ profile, handleLike, setFullScreenImage, themeStyles, l
         {profile.images?.[0]?.image_url ? (
           <img
             src={profile.images[0].image_url}
-            alt={profile.name}
+            alt={profile.username ? `@${profile.username}` : "Unknown"}
             style={elegantStyles.image}
             onClick={() => setFullScreenImage(profile.images[0].image_url)}
             onError={(e) => { e.target.style.display = "none"; }}
@@ -355,7 +355,7 @@ const ElegantLayout = ({ profile, handleLike, setFullScreenImage, themeStyles, l
       </div>
 
       <div className={feedCss.overviewInfo} style={elegantStyles.overviewInfo}>
-        <h2 className={feedCss.name} style={elegantStyles.name}>{profile.name}</h2>
+        <h2 className={feedCss.name} style={elegantStyles.name}>{profile.username ? `@${profile.username}` : "Unknown"}</h2>
         <div style={elegantStyles.metaRow}>
           <span>{getGenderLabel(profile)}</span>
           <span>•</span>
@@ -488,13 +488,13 @@ const MinimalLayout = ({ profile, handleLike, setFullScreenImage, themeStyles, l
       <div style={{ width: 140, height: 140, borderRadius: "50%", overflow: "hidden", border: `4px solid ${themeStyles.accent}`, marginBottom: 20 }}>
         <img
           src={profile.images?.[0]?.image_url}
-          alt={profile.name}
+          alt={profile.username ? `@${profile.username}` : "Unknown"}
           style={{ width: "100%", height: "100%", objectFit: "cover", cursor: "pointer" }}
           onClick={() => setFullScreenImage(profile.images?.[0]?.image_url)}
           onError={(e) => { e.target.style.display = "none"; }}
         />
       </div>
-      <h2 style={{ fontSize: 28, fontFamily: "var(--font-display)", color: "#fff", margin: "0 0 8px 0" }}>{profile.name}, {profile.age}</h2>
+      <h2 style={{ fontSize: 28, fontFamily: "var(--font-display)", color: "#fff", margin: "0 0 8px 0" }}>{profile.username ? `@${profile.username}` : "Unknown"}, {profile.age}</h2>
       <div style={{ color: "rgba(255,255,255,0.7)", fontSize: 13, marginBottom: 16 }}>{profile.city}</div>
       <p style={{ textAlign: "center", color: "#fff", fontSize: 15, fontStyle: "italic", marginBottom: 24, padding: "0 20px" }}>
         {profile.bio ? `"${profile.bio}"` : "No bio provided."}
@@ -544,7 +544,7 @@ const GridGalleryLayout = ({ profile, handleLike, setFullScreenImage, themeStyle
       </div>
 
       <div style={{ flex: 1, overflowY: "auto", color: "#fff", paddingBottom: 60 }}>
-        <h2 style={{ fontSize: 26, fontFamily: "var(--font-display)", margin: "0 0 4px 0" }}>{profile.name}, {profile.age}</h2>
+        <h2 style={{ fontSize: 26, fontFamily: "var(--font-display)", margin: "0 0 4px 0" }}>{profile.username ? `@${profile.username}` : "Unknown"}, {profile.age}</h2>
         <div style={{ color: themeStyles.accent, fontSize: 13, fontWeight: "bold", marginBottom: 12 }}>{profile.city} • {profile.distance_km} KM away</div>
         <p style={{ fontSize: 14, lineHeight: 1.5, background: "rgba(0,0,0,0.3)", padding: 16, borderRadius: 12, marginBottom: 16 }}>
           {profile.bio || "This person hasn't written a bio yet."}
@@ -575,7 +575,7 @@ const ImmersiveLayout = ({ profile, handleLike, setFullScreenImage, themeStyles,
       {primaryImg ? (
         <img 
           src={primaryImg} 
-          alt={profile.name} 
+          alt={profile.username ? `@${profile.username}` : "Unknown"} 
           style={{ width: "100%", height: "100%", objectFit: "cover", position: "absolute", top: 0, left: 0 }}
           onClick={() => setFullScreenImage(primaryImg)}
         />
@@ -585,7 +585,7 @@ const ImmersiveLayout = ({ profile, handleLike, setFullScreenImage, themeStyles,
       
       <div style={{ position: "absolute", bottom: 0, left: 0, right: 0, background: "linear-gradient(to top, rgba(0,0,0,0.9) 0%, rgba(0,0,0,0.5) 50%, transparent 100%)", padding: "100px 24px 24px 24px", color: "#fff", pointerEvents: "none" }}>
         <h2 style={{ fontSize: 32, fontFamily: "var(--font-display)", margin: "0 0 4px 0", textShadow: "0 2px 4px rgba(0,0,0,0.5)" }}>
-          {profile.name}, {profile.age}
+          {profile.username ? `@${profile.username}` : "Unknown"}, {profile.age}
         </h2>
         <div style={{ fontSize: 14, opacity: 0.9, marginBottom: 16 }}>
           {profile.city} • {getGenderLabel(profile)}

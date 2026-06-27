@@ -1,9 +1,11 @@
 import React, { useState, useEffect } from "react";
 import { optionsAPI, profileAPI } from "../api";
 import useSubscription from "../hooks/useSubscription";
+import { isValidUsername, normalizeUsername } from "../utils/userDisplay";
+
 export default function OnboardingPage({ onComplete }) {
   const [step, setStep] = useState(1);
-  const [name, setName] = useState("");
+  const [username, setUsername] = useState("");
   const [dob, setDob] = useState("");
   const [gender, setGender] = useState("");
   const [preferredGenders, setPreferredGenders] = useState([]);
@@ -52,10 +54,27 @@ export default function OnboardingPage({ onComplete }) {
     fetchOptions();
   }, []);
 
-  const handleNext = () => {
-    if (step === 1 && (!name.trim() || !dob)) {
-      setError("Please fill in your name and date of birth.");
-      return;
+  const handleNext = async () => {
+    if (step === 1) {
+      const normalized = normalizeUsername(username);
+      if (!normalized || !dob) {
+        setError("Please choose a username and enter your date of birth.");
+        return;
+      }
+      if (!isValidUsername(normalized)) {
+        setError("Username must be 3–30 characters (letters, numbers, underscores, or periods only).");
+        return;
+      }
+      try {
+        const check = await profileAPI.checkUsernameAvailable(normalized);
+        if (!check.available) {
+          setError(check.error || "This username is already taken.");
+          return;
+        }
+      } catch (err) {
+        setError(err.message || "Could not verify username. Please try again.");
+        return;
+      }
     }
     if (step === 2 && (!gender || !sexuality || preferredGenders.length === 0)) {
       setError("Please select your gender, sexuality, and at least one preferred gender.");
@@ -117,7 +136,7 @@ export default function OnboardingPage({ onComplete }) {
 
     try {
       const payload = {
-        name: name.trim(),
+        username: normalizeUsername(username),
         date_of_birth: dob,
         gender: gender,
         preferred_genders: preferredGenders,
@@ -132,9 +151,16 @@ export default function OnboardingPage({ onComplete }) {
       if (res && !res.error) {
         setStep(6);
       } else {
-        setError(res.error || "Failed to update profile. Please try again.");
+        const usernameError = res?.username?.[0];
+        setError(usernameError || res.error || "Failed to update profile. Please try again.");
       }
-    } catch {
+    } catch (err) {
+      const usernameError = err?.data?.username?.[0];
+      if (usernameError) {
+        setError(usernameError);
+        setSubmitting(false);
+        return;
+      }
       // Demo mode fallback
       setStep(6);
     } finally {
@@ -186,18 +212,20 @@ export default function OnboardingPage({ onComplete }) {
           {step === 1 && (
             <div>
               <h2 style={styles.title}>Let's start with the basics</h2>
-              <p style={styles.subtitle}>What should we call you and when's your birthday?</p>
+              <p style={styles.subtitle}>Pick a unique username and enter your birthday.</p>
               
               <div style={styles.field}>
-                <label style={styles.label}>Your Name</label>
+                <label style={styles.label}>Username</label>
                 <input
                   type="text"
-                  placeholder="Your first name"
+                  placeholder="your_username"
                   style={styles.input}
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
+                  value={username}
+                  onChange={(e) => setUsername(e.target.value.replace(/\s/g, ""))}
                   autoFocus
+                  autoComplete="username"
                 />
+                <p style={styles.note}>Like Instagram — letters, numbers, underscores, and periods only.</p>
               </div>
 
               <div style={styles.field}>

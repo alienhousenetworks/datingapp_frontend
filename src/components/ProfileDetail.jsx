@@ -83,7 +83,7 @@ export default function ProfileDetail({ profile, onClose, onLike, onPass }) {
   // Safe fallbacks for both real API and mock data
   const tags = profile.tags || [];
   const prompts = profile.prompts || [];
-  const initial = profile.name?.[0]?.toUpperCase() || profile.letter || "?";
+  const initial = profile.username?.[0]?.toUpperCase() || profile.letter || "?";
   const themeStyles = resolveThemeStyles(profile.theme);
 
   const handleLike = async () => {
@@ -128,7 +128,7 @@ export default function ProfileDetail({ profile, onClose, onLike, onPass }) {
         {profile.images?.[activeImageIdx]?.image_url ? (
           <img
             src={profile.images[activeImageIdx].image_url}
-            alt={profile.name}
+            alt={profile.username || "profile"}
             style={{
               position: "absolute",
               inset: 0,
@@ -159,7 +159,7 @@ export default function ProfileDetail({ profile, onClose, onLike, onPass }) {
             >
               <img 
                 src={img.image_url} 
-                alt={`${profile.name} ${i}`} 
+                alt={`${profile.username || "profile"} ${i}`} 
                 style={styles.thumbnailImg} 
                 onError={(e) => { e.target.style.display = "none"; }}
               />
@@ -173,7 +173,7 @@ export default function ProfileDetail({ profile, onClose, onLike, onPass }) {
         <div style={styles.nameRow}>
           <div>
             <h2 style={styles.name}>
-              {profile.name}, {profile.age}
+              {profile.username ? `@${profile.username}` : "Unknown"}, {profile.age}
             </h2>
             <p style={styles.meta}>
               {[

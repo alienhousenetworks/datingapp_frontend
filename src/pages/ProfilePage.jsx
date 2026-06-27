@@ -23,7 +23,7 @@ const ALL_VIBES = [
 ];
 
 export default function ProfilePage() {
-  const [name, setName] = useState("");
+  const [username, setUsername] = useState("");
   const [age, setAge] = useState("");
   const [bio, setBio] = useState("");
   const [hotTake, setHotTake] = useState("");
@@ -82,7 +82,7 @@ export default function ProfilePage() {
         if (turnOnsList) setTurnOnOpts(turnOnsList);
         if (languagesList) setLanguageOpts(languagesList);
         if (profile) {
-          setName(profile.name || "");
+          setUsername(profile.username || "");
           setAge(profile.age || "");
           setBio(profile.bio || "");
           // intent comes back as PK (UUID) from the API
@@ -192,7 +192,7 @@ export default function ProfilePage() {
     try {
       // Build PATCH payload — only include fields being changed
       const payload = { bio, languages, sexuality, turn_ons: turnOns };
-      if (name) payload.name = name;
+      if (username) payload.username = username.trim().toLowerCase();
       if (age) payload.age = parseInt(age);
       if (city) payload.city = city;
       if (!lat || !lon) {
@@ -488,12 +488,13 @@ export default function ProfilePage() {
           {/* Basic info */}
           <div style={styles.card}>
             <div style={styles.cardLabel}>Basic Info</div>
-            <label style={styles.fieldLabel}>Name</label>
+            <label style={styles.fieldLabel}>Username</label>
             <input
               style={styles.input}
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="Your name"
+              value={username}
+              onChange={(e) => setUsername(e.target.value.replace(/\s/g, ""))}
+              placeholder="your_username"
+              autoComplete="username"
             />
             <label style={styles.fieldLabel}>Age</label>
             <input

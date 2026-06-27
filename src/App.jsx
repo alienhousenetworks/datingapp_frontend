@@ -101,7 +101,7 @@ export default function App() {
     try {
       const profile = await profileAPI.getMyProfile();
       // If profile is missing basic fields, send to onboarding
-      if (profile && profile.name && profile.gender) {
+      if (profile && profile.username && profile.gender) {
         setScreen("app");
         setShowMood(true);
       } else {

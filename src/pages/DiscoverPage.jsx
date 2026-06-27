@@ -158,10 +158,10 @@ export default function DiscoverPage({ user, setTab }) {
     try {
       const res = await interactionAPI.like(profile.id);
       if (res.status === "match") {
-        showToast(`🎉 It's a match with ${profile.name}!`);
+        showToast(`🎉 It's a match with ${profile.username ? `@${profile.username}` : "them"}!`);
         window.dispatchEvent(new Event("new_match"));
       } else {
-        showToast(`♥ You liked ${profile.name}!`);
+        showToast(`♥ You liked ${profile.username ? `@${profile.username}` : "them"}!`);
       }
       setSelected(null);
     } catch (err) {
@@ -169,7 +169,7 @@ export default function DiscoverPage({ user, setTab }) {
         setShowPaywall(true);
         subscription.refresh();
       } else {
-        showToast(`Failed to like ${profile.name}. Please try again.`);
+        showToast(`Failed to like ${profile.username ? `@${profile.username}` : "them"}. Please try again.`);
         if (err.data?.details) {
           alert("Server Error Details: " + err.data.details);
         }
@@ -181,7 +181,7 @@ export default function DiscoverPage({ user, setTab }) {
   const handlePass = async (profile) => {
     try {
       await interactionAPI.pass(profile.id);
-      showToast(`Passed on ${profile.name}`);
+      showToast(`Passed on ${profile.username ? `@${profile.username}` : "them"}`);
       setProfiles((ps) => ps.filter((p) => p.id !== profile.id));
       setSelected(null);
     } catch (err) {
@@ -189,7 +189,7 @@ export default function DiscoverPage({ user, setTab }) {
         setShowPaywall(true);
         subscription.refresh();
       } else {
-        showToast(`Failed to pass on ${profile.name}. Please try again.`);
+        showToast(`Failed to pass on ${profile.username ? `@${profile.username}` : "them"}. Please try again.`);
       }
     }
   };

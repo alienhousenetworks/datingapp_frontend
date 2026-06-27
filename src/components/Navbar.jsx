@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { userAPI, profileAPI, matchAPI } from "../api";
+import { profileAPI, matchAPI } from "../api";
 import { isCompactNav } from "../constants/breakpoints";
 import css from "../styles/Navbar.module.css";
 const navItems = [
@@ -52,16 +52,9 @@ export default function Navbar({ tab, setTab, onLogout }) {
     const load = async () => {
       try {
         const profile = await profileAPI.getMyProfile();
-        if (profile?.name) {
-          setUserName(profile.name);
-          setUserInitial(profile.name[0].toUpperCase());
-        } else {
-          const user = await userAPI.getMe();
-          if (user?.email) {
-            const n = user.email.split("@")[0];
-            setUserName(n);
-            setUserInitial(n[0].toUpperCase());
-          }
+        if (profile?.username) {
+          setUserName(`@${profile.username}`);
+          setUserInitial(profile.username[0].toUpperCase());
         }
         if (profile) {
           setUserCity(profile.city || profile.state || profile.country || "Location not set");

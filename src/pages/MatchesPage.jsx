@@ -7,6 +7,7 @@ import {
   profileAPI,
 } from "../api";
 import matchesStyles from "../styles/MatchesPage.module.css";
+import { getUserDisplayName, getUserInitial } from "../utils/userDisplay";
 
 // Colour palette for avatars
 const COLORS = [
@@ -73,12 +74,17 @@ export default function MatchesPage({ onOpenChat }) {
 
       if (userIds.length > 0) {
         const hydrated = await Promise.all(
-          userIds.slice(0, 20).map(async (uid) => {
+          userIds.slice(0, 20).map(async (userData) => {
+            const uid = typeof userData === "string" ? userData : userData?.id;
+            const profile = userData?.profile;
+            if (profile) {
+              return { id: uid, ...profile };
+            }
             try {
               const p = await profileAPI.getProfile(uid);
               return { id: uid, ...p };
             } catch {
-              return { id: uid, name: `User ${String(uid).slice(0, 8)}` };
+              return { id: uid };
             }
           }),
         );
@@ -136,8 +142,7 @@ export default function MatchesPage({ onOpenChat }) {
     }
   };
 
-  const getInitial = (user) =>
-    user?.email?.[0]?.toUpperCase() || user?.id?.[0]?.toUpperCase() || "?";
+  const getInitial = getUserInitial;
 
   const formatTime = (iso) => {
     if (!iso) return "";
@@ -178,7 +183,7 @@ export default function MatchesPage({ onOpenChat }) {
                   </div>
                 </div>
                 <span style={styles.matchName}>
-                  {m.other_user?.email?.split("@")[0] || "Match"}
+                  {getUserDisplayName(m.other_user)}
                 </span>
               </div>
             ))}
@@ -249,7 +254,7 @@ export default function MatchesPage({ onOpenChat }) {
                 </span>
               </div>
               <p style={styles.reqText}>
-                <strong>{sender.name || "Someone"}</strong>
+                <strong>{getUserDisplayName(sender)}</strong>
                 {sender.age ? `, ${sender.age}` : ""} liked your profile!
               </p>
               <div style={styles.reqActions}>
@@ -302,7 +307,7 @@ export default function MatchesPage({ onOpenChat }) {
                     </div>
                     <div style={styles.convoBody}>
                       <div style={styles.convoName}>
-                        {user.email?.split("@")[0] || "Match"}
+                        {getUserDisplayName(user)}
                       </div>
                       <div style={styles.convoMsg}>
                         {lastMsg?.content?.text || "Say hello 👋"}

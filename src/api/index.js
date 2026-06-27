@@ -259,6 +259,13 @@ export const profileAPI = {
     const res = await apiFetch(`/profile/${userId}/`);
     return res.json();
   },
+
+  checkUsernameAvailable: async (username) => {
+    const res = await apiFetch(
+      `/profile/username-available/?username=${encodeURIComponent(username)}`
+    );
+    return res.json();
+  },
 };
 
 // ============================================================

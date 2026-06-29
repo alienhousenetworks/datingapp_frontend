@@ -42,7 +42,10 @@ export default function ChatPage({ initialMatch }) {
             return convs[0] || null;
           }
           const updated = convs.find((c) => c.id === prevActive.id);
-          return updated || prevActive;
+          // If the conversation no longer exists in the API response (e.g. unmatched/deleted),
+          // clear activeConv instead of keeping the stale reference. Keeping it would cause
+          // ChatWindow to open a WS to a room the user is no longer a participant of (→ 403 loop).
+          return updated || null;
         });
       }
     } catch {

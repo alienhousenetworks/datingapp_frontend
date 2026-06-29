@@ -392,7 +392,27 @@ export default function ChatWindow({ conversation, onDeleteConversation }) {
     }
     reconnectAttemptsRef.current = 0;
 
+    // Guard: verify the user is still a participant before opening the socket.
+    // This prevents a 403 storm when the conversation was deleted/unmatched but
+    // the UI still holds a stale activeConv reference.
+    try {
+      const convs = await chatAPI.getConversations();
+      const isParticipant = (convs || []).some((c) => c.id === conversation.id);
+      if (!isParticipant) {
+        console.warn(
+          `[ChatWS] Conversation ${conversation.id} not found in user's list — aborting WS connect.`
+        );
+        return;
+      }
+    } catch (err) {
+      console.warn("[ChatWS] Could not verify conversation participation:", err);
+      // Proceed optimistically; the server will reject if truly unauthorised.
+    }
+
     const connect = async (isReconnect = false) => {
+      // Abort if the conversation reference has changed (e.g. user switched chat)
+      if (!wsRef || wsRef._aborted) return;
+
       try {
         const res = await authAPI.getWsTicket();
         if (!res || !res.ticket) return;
@@ -489,7 +509,22 @@ export default function ChatWindow({ conversation, onDeleteConversation }) {
           }
         };
 
-        ws.onclose = () => {
+        ws.onclose = (event) => {
+          // WebSocket close codes for permanent auth failures:
+          //   1006 = abnormal closure (what browsers report for HTTP 403 on WS upgrade)
+          //   4403 = custom code the server can send for explicit unauthorised close
+          // Do NOT retry these — the conversation is gone or the user is not a participant.
+          const isPermanentAuthFailure =
+            event.code === 4403 ||
+            (event.code === 1006 && reconnectAttemptsRef.current === 0);
+
+          if (isPermanentAuthFailure) {
+            console.warn(
+              `[ChatWS] Permanent auth failure (code ${event.code}) for conversation ${conversation.id}. Stopping retries.`
+            );
+            return;
+          }
+
           // Exponential backoff: 5s, 10s, 20s, 30s max
           const attempts = reconnectAttemptsRef.current;
           const delay = Math.min(5000 * Math.pow(2, attempts), 30000);

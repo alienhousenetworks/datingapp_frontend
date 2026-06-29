@@ -19,10 +19,24 @@ const formatDistanceFilterLabel = (distance) => {
   return `${distance} km`;
 };
 
+const formatLocationFilterLabel = (filters) => {
+  if (filters.location_mode === "region") {
+    const parts = [filters.city, filters.state, filters.country]
+      .map((v) => (v || "").trim())
+      .filter(Boolean);
+    if (parts.length > 0) return parts.join(", ");
+  }
+  return formatDistanceFilterLabel(filters.distance);
+};
+
 const DEFAULT_FILTERS = {
   min_age: 18,
   max_age: 100,
   distance: 0,
+  location_mode: "distance",
+  city: "",
+  state: "",
+  country: "",
   intent: "",
   currently_online: false,
   gender: [],
@@ -127,6 +141,10 @@ export default function DiscoverPage({ user, setTab }) {
         } else if (err.data?.verification_status || err.data?.feed_unlocked === false) {
           setIsLocked(true);
         }
+      } else if (err.status >= 500) {
+        showToast(
+          err.message || "Discover is temporarily unavailable. Pull to refresh in a moment."
+        );
       }
       if (!append) setProfiles([]);
       setHasMore(false);
@@ -239,13 +257,13 @@ export default function DiscoverPage({ user, setTab }) {
             className={discoverStyles.filterBtn}
             style={{
               ...styles.filterBtn,
-              ...(activeFilter === "distance" ? styles.filterBtnActive : {}),
+              ...(activeFilter === "location" ? styles.filterBtnActive : {}),
             }}
             onClick={() =>
-              setActiveFilter(activeFilter === "distance" ? null : "distance")
+              setActiveFilter(activeFilter === "location" ? null : "location")
             }
           >
-            {formatDistanceFilterLabel(filters.distance)} ▾
+            {formatLocationFilterLabel(filters)} ▾
           </button>
           <button
             className={discoverStyles.filterBtn}
@@ -312,20 +330,92 @@ export default function DiscoverPage({ user, setTab }) {
               </button>
             </div>
           )}
-          {activeFilter === "distance" && (
+          {activeFilter === "location" && (
             <div style={styles.filterRow}>
-              {DISTANCE_FILTER_OPTIONS.map(({ value, label }) => (
-                <button
-                  key={value}
-                  style={{
-                    ...styles.distChip,
-                    ...(filters.distance === value ? styles.distChipOn : {}),
-                  }}
-                  onClick={() => applyFilters({ ...filters, distance: value })}
-                >
-                  {label}
-                </button>
-              ))}
+              <button
+                style={{
+                  ...styles.distChip,
+                  ...(filters.location_mode === "distance" ? styles.distChipOn : {}),
+                }}
+                onClick={() =>
+                  setFilters({
+                    ...filters,
+                    location_mode: "distance",
+                    city: "",
+                    state: "",
+                    country: "",
+                  })
+                }
+              >
+                Near me
+              </button>
+              <button
+                style={{
+                  ...styles.distChip,
+                  ...(filters.location_mode === "region" ? styles.distChipOn : {}),
+                }}
+                onClick={() =>
+                  setFilters({ ...filters, location_mode: "region" })
+                }
+              >
+                By city/region
+              </button>
+              {filters.location_mode === "distance" ? (
+                DISTANCE_FILTER_OPTIONS.map(({ value, label }) => (
+                  <button
+                    key={value}
+                    style={{
+                      ...styles.distChip,
+                      ...(filters.distance === value ? styles.distChipOn : {}),
+                    }}
+                    onClick={() =>
+                      applyFilters({
+                        ...filters,
+                        location_mode: "distance",
+                        distance: value,
+                        city: "",
+                        state: "",
+                        country: "",
+                      })
+                    }
+                  >
+                    {label}
+                  </button>
+                ))
+              ) : (
+                <>
+                  <input
+                    style={styles.regionInput}
+                    placeholder="City"
+                    value={filters.city}
+                    onChange={(e) =>
+                      setFilters({ ...filters, city: e.target.value })
+                    }
+                  />
+                  <input
+                    style={styles.regionInput}
+                    placeholder="State"
+                    value={filters.state}
+                    onChange={(e) =>
+                      setFilters({ ...filters, state: e.target.value })
+                    }
+                  />
+                  <input
+                    style={styles.regionInput}
+                    placeholder="Country"
+                    value={filters.country}
+                    onChange={(e) =>
+                      setFilters({ ...filters, country: e.target.value })
+                    }
+                  />
+                  <button
+                    style={styles.applyBtn}
+                    onClick={() => applyFilters(filters)}
+                  >
+                    Apply
+                  </button>
+                </>
+              )}
             </div>
           )}
           {activeFilter === "intent" && (
@@ -532,6 +622,16 @@ const styles = {
     background: "var(--pink-dim)",
     borderColor: "rgba(255,31,107,0.4)",
     color: "var(--pink-soft)",
+  },
+  regionInput: {
+    padding: "8px 12px",
+    borderRadius: 12,
+    background: "var(--dark-700)",
+    border: "0.5px solid var(--dark-500)",
+    color: "var(--dark-100)",
+    fontSize: 12,
+    minWidth: 120,
+    fontFamily: "var(--font-display)",
   },
   filterDivider: {
     fontSize: 10,

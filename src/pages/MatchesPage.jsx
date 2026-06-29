@@ -218,10 +218,20 @@ export default function MatchesPage({ onOpenChat }) {
           {confessionRequests.map((req) => (
             <div key={req.id} style={styles.requestCard} className={matchesStyles.requestCard}>
               <div style={styles.reqHeader}>
-                <span style={styles.reqBadge}>Anonymous Confession 🤫</span>
+                <span style={styles.reqBadge}>Confession Chat Request 🤫</span>
                 <span style={styles.reqTime}>{formatTime(req.created_at)}</span>
               </div>
-              <p style={styles.reqText}>"{req.confession_text}"</p>
+              <p style={styles.reqText}>
+                <strong>{getUserDisplayName(req.sender)}</strong> wants to chat
+              </p>
+              <p style={{ ...styles.reqText, fontSize: 12, color: "var(--dark-300)" }}>
+                From your confession: "{req.confession_text}"
+              </p>
+              {req.message ? (
+                <p style={{ ...styles.reqText, marginTop: 6 }}>
+                  Their message: "{req.message}"
+                </p>
+              ) : null}
               <div style={styles.reqActions}>
                 <button
                   style={{ ...styles.reqBtn, ...styles.acceptReqBtn }}

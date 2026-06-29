@@ -348,13 +348,26 @@ export const feedAPI = {
     const params = new URLSearchParams({ count: String(count), cursor: String(cursor) });
     if (filters.min_age != null) params.set("min_age", String(filters.min_age));
     if (filters.max_age != null) params.set("max_age", String(filters.max_age));
-    if (filters.distance != null && filters.distance !== "") {
-      params.set("distance", String(filters.distance));
-    }
     if (filters.intent) params.set("intent", filters.intent);
-    if (filters.city) params.set("city", filters.city);
-    if (filters.state) params.set("state", filters.state);
-    if (filters.country) params.set("country", filters.country);
+
+    const city = (filters.city || "").trim();
+    const state = (filters.state || "").trim();
+    const country = (filters.country || "").trim();
+    const usesRegion =
+      filters.location_mode === "region" ||
+      ((city || state || country) && filters.location_mode !== "distance");
+
+    if (usesRegion && (city || state || country)) {
+      params.set("location_mode", "region");
+      if (city) params.set("city", city);
+      if (state) params.set("state", state);
+      if (country) params.set("country", country);
+    } else {
+      params.set("location_mode", "distance");
+      if (filters.distance != null && filters.distance !== "") {
+        params.set("distance", String(filters.distance));
+      }
+    }
     if (filters.currently_online) params.set("currently_online", "true");
     (filters.gender || []).forEach((g) => params.append("gender", String(g)));
     const res = await apiFetch(`/feed/?${params.toString()}`);

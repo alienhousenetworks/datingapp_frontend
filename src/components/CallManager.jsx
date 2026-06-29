@@ -995,7 +995,11 @@ export default function CallManager({ user, debug }) {
 
     const allTransceivers = pc.getTransceivers();
 
-    // First: match by sender or receiver track kind (works post-negotiation)
+    // FIX 3: Match by sender OR receiver track kind.
+    // The callee path: after setRemoteDescription, the receiver track is already
+    // set (kind = audio/video) but sender track is null. Old code checked
+    // sender?.track?.kind which is null on the callee — causing this to miss.
+    // Now we also check receiver?.track?.kind so callee transceivers are found.
     const byTrack = allTransceivers.find((t) => {
       const sKind = t.sender?.track?.kind;
       const rKind = t.receiver?.track?.kind;
@@ -1003,12 +1007,19 @@ export default function CallManager({ user, debug }) {
     });
     if (byTrack) {
       transceiversRef.current[kind] = byTrack;
+      trace("MEDIA", `${kind} transceiver matched by track kind`, {
+        mid: byTrack.mid,
+        direction: byTrack.direction,
+        senderTrackKind: byTrack.sender?.track?.kind || null,
+        receiverTrackKind: byTrack.receiver?.track?.kind || null,
+      });
       return byTrack;
     }
 
-    // Second: match by mid order — audio=mid"0", video=mid"1"
-    // This is the callee path: transceivers exist from setRemoteDescription
-    // but have no sender track yet, so track-kind matching fails.
+    // Second: match by mid value from the SDP (audio=mid"0", video=mid"1" in
+    // most negotiated sessions). This is a fallback for transceivers that exist
+    // from setRemoteDescription but whose receiver.track is not yet populated
+    // (e.g. older browser builds).
     const midIndex = kind === "audio" ? "0" : "1";
     const byMid = allTransceivers.find((t) =>
       t.mid === midIndex && t.direction !== "stopped"
@@ -1019,13 +1030,26 @@ export default function CallManager({ user, debug }) {
       return byMid;
     }
 
-    // Third: only create new if no negotiation has started
+    // Third fallback: match by SDP order (index 0 = audio, index 1 = video)
+    // in case mid is null before first ICE connection.
+    const byIndex = allTransceivers.filter((t) => t.direction !== "stopped")[kind === "audio" ? 0 : 1];
+    if (byIndex) {
+      transceiversRef.current[kind] = byIndex;
+      trace("MEDIA", `${kind} transceiver matched by array index`, { mid: byIndex.mid, direction: byIndex.direction });
+      return byIndex;
+    }
+
+    // Fourth: only create new if no negotiation has started
     if (initialNegotiationStartedRef.current) {
       throw new Error(`Refusing to add ${kind} transceiver after initial negotiation started`);
     }
 
-    const needsVideo = callTypeRef.current === "video" || callTypeRef.current === "blind_date";
-    const direction = kind === "video" && !needsVideo ? "inactive" : "sendrecv";
+    // For new transceivers, derive direction from both callTypeRef and stream state
+    const streamHasVideo =
+      kind === "video" && localStreamRef.current?.getVideoTracks()[0]?.readyState === "live";
+    const callTypeNeedsVideo =
+      callTypeRef.current === "video" || callTypeRef.current === "blind_date";
+    const direction = kind === "video" && !(callTypeNeedsVideo || streamHasVideo) ? "inactive" : "sendrecv";
     const init = { direction };
     if (track) init.streams = [localStreamRef.current].filter(Boolean);
 
@@ -1072,7 +1096,12 @@ export default function CallManager({ user, debug }) {
       throw new Error(`Audio track not ready: enabled=${audioTrack.enabled} readyState=${audioTrack.readyState}`);
     }
 
-    const needsVideo = callTypeRef.current === "video" || callTypeRef.current === "blind_date";
+    // Use stream presence as ground-truth for video (consistent with syncSendersWithTracks).
+    // callTypeRef may be briefly stale on the callee; if the stream already has a
+    // live video track, we must validate it regardless of what the ref says.
+    const callTypeNeedsVideo = callTypeRef.current === "video" || callTypeRef.current === "blind_date";
+    const streamHasVideo = !!localStream.getVideoTracks()[0];
+    const needsVideo = callTypeNeedsVideo || streamHasVideo;
     if (needsVideo) {
       const videoTrack = localStream.getVideoTracks()[0];
       if (!videoTrack) throw new Error("Missing video track before SDP offer");
@@ -1080,7 +1109,7 @@ export default function CallManager({ user, debug }) {
         throw new Error(`Video track not ready: enabled=${videoTrack.enabled} readyState=${videoTrack.readyState}`);
       }
     }
-    trace("MEDIA", "tracks ready", { needsVideo });
+    trace("MEDIA", "tracks ready", { needsVideo, callTypeNeedsVideo, streamHasVideo });
   };
 
   const syncSendersWithTracks = async (pc = pcRef.current) => {
@@ -1089,7 +1118,27 @@ export default function CallManager({ user, debug }) {
     assertMediaTracksReady();
     const audioTrack = localStreamRef.current.getAudioTracks()[0];
     const videoTrack = localStreamRef.current.getVideoTracks()[0] || null;
-    const needsVideo = callTypeRef.current === "video" || callTypeRef.current === "blind_date";
+
+    // FIX 2: Derive needsVideo from BOTH the callTypeRef AND whether the local
+    // stream actually contains a live video track.
+    // On the callee side, callTypeRef.current may briefly be stale (React state
+    // hasn't flushed yet) but getUserMedia in acceptCall() already captured video
+    // tracks if the call is a video call — so checking the stream is the
+    // ground-truth source and prevents the video transceiver from being set to
+    // 'inactive' when callTypeRef still reads 'voice'.
+    const callTypeNeedsVideo =
+      callTypeRef.current === "video" || callTypeRef.current === "blind_date";
+    const streamHasVideo =
+      videoTrack !== null && videoTrack.readyState === "live";
+    const needsVideo = callTypeNeedsVideo || streamHasVideo;
+
+    logWebRTC("SYNC_SENDERS", {
+      callType: callTypeRef.current,
+      callTypeNeedsVideo,
+      streamHasVideo,
+      needsVideo,
+      videoTrackId: videoTrack?.id || null,
+    });
 
     const audioTransceiver = ensureTransceiver("audio", audioTrack, pc);
     if (audioTransceiver.sender.track !== audioTrack) {
@@ -1108,8 +1157,8 @@ export default function CallManager({ user, debug }) {
       }
       videoTransceiver.direction = "sendrecv";
       trace("MEDIA", "video sender attached", {
-        enabled: videoTrack.enabled,
-        readyState: videoTrack.readyState,
+        enabled: videoTrack?.enabled,
+        readyState: videoTrack?.readyState,
         direction: videoTransceiver.direction,
       });
     } else {
@@ -2286,6 +2335,11 @@ export default function CallManager({ user, debug }) {
         callIdRef.current = msg.call_id;
         calleeIdRef.current = msg.caller_id || "";
         resetCallTimeline(msg.call_id);
+        // FIX 1: Write call_type directly into callTypeRef so setupWebRTCPeer
+        // always reads the correct type regardless of React render timing.
+        // React state (setCallType) is async; callTypeRef.current must be
+        // authoritative before the useEffect([callState]) fires.
+        callTypeRef.current = msg.call_type;
         setCallType(msg.call_type);
         setCallerEmail(msg.caller_email || "Someone");
         setCallState("incoming");

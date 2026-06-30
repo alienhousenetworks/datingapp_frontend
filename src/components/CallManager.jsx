@@ -1079,10 +1079,9 @@ export default function CallManager({ user, debug }) {
   const getMediaConstraints = (needsVideo) => ({
     audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
     video: needsVideo ? {
-      width: { min: 320, ideal: 640, max: 1280 },
-      height: { min: 240, ideal: 480, max: 720 },
-      aspectRatio: { ideal: 1.333 },
-      frameRate: { min: 15, ideal: 24, max: 30 },
+      width: { ideal: 640 },
+      height: { ideal: 480 },
+      frameRate: { ideal: 24 },
     } : false,
   });
 

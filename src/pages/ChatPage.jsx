@@ -73,6 +73,17 @@ export default function ChatPage({ initialMatch }) {
     await loadConversations(false);
   };
 
+  // Called by ChatWindow when it detects it tried to WS-connect to a conversation
+  // that no longer exists in the user's conversation list (left/unmatched).
+  // Immediately clears the stale activeConv and falls back to the first valid one.
+  const handleConversationInvalid = (invalidId) => {
+    setConversations((prev) => {
+      const remaining = prev.filter((c) => c.id !== invalidId);
+      setActiveConv(remaining[0] || null);
+      return remaining;
+    });
+  };
+
   const getInitial = getUserInitial;
 
   const formatTime = (iso) => {
@@ -153,7 +164,11 @@ export default function ChatPage({ initialMatch }) {
       </div>
 
       {/* Chat window */}
-      <ChatWindow conversation={activeConv} onDeleteConversation={handleDeleteConversation} />
+      <ChatWindow
+        conversation={activeConv}
+        onDeleteConversation={handleDeleteConversation}
+        onConversationInvalid={handleConversationInvalid}
+      />
     </div>
   );
 }

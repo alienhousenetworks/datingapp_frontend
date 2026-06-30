@@ -12,7 +12,7 @@ const getAbsoluteMediaUrl = (url) => {
 const COLORS = ["#FF1F6B", "#A855F7", "#06B6D4", "#F59E0B", "#10B981"];
 const getColor = (i) => COLORS[i % COLORS.length];
 
-export default function ChatWindow({ conversation, onDeleteConversation }) {
+export default function ChatWindow({ conversation, onDeleteConversation, onConversationInvalid }) {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [typing, setTyping] = useState(false);
@@ -179,6 +179,8 @@ export default function ChatWindow({ conversation, onDeleteConversation }) {
   const endRef = useRef(null);
   const reconnectTimeoutRef = useRef(null);
   const reconnectAttemptsRef = useRef(0);
+  // Prevents multiple parallel connectWebSocket() invocations (e.g. mount + visibilitychange)
+  const wsConnectingRef = useRef(false);
 
   // ── Load messages when conversation changes ─────────────
   useEffect(() => {
@@ -381,6 +383,12 @@ export default function ChatWindow({ conversation, onDeleteConversation }) {
 
   // ── WebSocket for real-time messages ─────────────────
   const connectWebSocket = async () => {
+    // Prevent parallel connect calls (e.g. mount + visibilitychange firing simultaneously).
+    // Each call resets reconnectAttemptsRef to 0, making every attempt look like the "first",
+    // so the permanent-auth-failure guard never fires until all parallel calls complete.
+    if (wsConnectingRef.current) return;
+    wsConnectingRef.current = true;
+
     if (wsRef.current) {
       wsRef.current.onclose = null;
       wsRef.current.close();
@@ -402,12 +410,19 @@ export default function ChatWindow({ conversation, onDeleteConversation }) {
         console.warn(
           `[ChatWS] Conversation ${conversation.id} not found in user's list — aborting WS connect.`
         );
+        wsConnectingRef.current = false;
+        // Notify parent so it can clear the stale activeConv and re-select a valid one
+        if (typeof onConversationInvalid === 'function') {
+          onConversationInvalid(conversation.id);
+        }
         return;
       }
     } catch (err) {
       console.warn("[ChatWS] Could not verify conversation participation:", err);
       // Proceed optimistically; the server will reject if truly unauthorised.
     }
+
+    wsConnectingRef.current = false;
 
     const connect = async (isReconnect = false) => {
       // Abort if the conversation reference has changed (e.g. user switched chat)

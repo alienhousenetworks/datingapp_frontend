@@ -2420,8 +2420,10 @@ export default function CallManager({ user, debug }) {
         // always reads the correct type regardless of React render timing.
         // React state (setCallType) is async; callTypeRef.current must be
         // authoritative before the useEffect([callState]) fires.
-        callTypeRef.current = msg.call_type;
-        setCallType(msg.call_type);
+        // Normalize callType to lowercase to match expectations ("video", "blind_date", "voice")
+        const callTypeLower = (msg.call_type || "").toLowerCase();
+        callTypeRef.current = callTypeLower;
+        setCallType(callTypeLower);
         setCallerEmail(msg.caller_email || "Someone");
         setCallState("incoming");
         break;
@@ -2648,10 +2650,12 @@ export default function CallManager({ user, debug }) {
       }
       // Gate on stream having video tracks — NOT callTypeRef, which can be stale.
       const localHasVideo = (localStreamRef.current?.getVideoTracks().length ?? 0) > 0;
-      if (localVideoRef.current && localStreamRef.current && localVideoRef.current.srcObject !== localStreamRef.current && localHasVideo) {
-        localVideoRef.current.srcObject = localStreamRef.current;
+      if (localVideoRef.current && localStreamRef.current && localHasVideo) {
+        if (localVideoRef.current.srcObject !== localStreamRef.current) {
+          localVideoRef.current.srcObject = localStreamRef.current;
+          log.webrtc("Aggressive rewire: localVideoRef.srcObject set");
+        }
         localVideoRef.current.play().catch(() => { });
-        log.webrtc("Aggressive rewire: localVideoRef.srcObject set");
       }
     }, 1000);
 

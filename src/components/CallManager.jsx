@@ -2184,56 +2184,42 @@ export default function CallManager({ user, debug }) {
           remoteDescriptionAppliedRef.current = true;
           await flushIceCandidates();
 
-          // ── CALLEE VIDEO FIX ────────────────────────────────────────────────
-          // Do NOT call syncSendersWithTracks() here. callTypeRef.current may
-          // still be stale (React state hasn't flushed) when this async handler
-          // runs, which causes the video transceiver to be set to 'inactive' —
-          // the root cause of the blank-video bug.
+          // ── CALLEE VIDEO FIX (v2) ────────────────────────────────────────────
+          // Do NOT use SDP text parsing — SDP uses CRLF (\r\n) which makes
+          // line.startsWith() unreliable. Chrome also omits 'a=sendrecv' (it is
+          // the implicit default), so a video section with no direction attribute
+          // would be wrongly detected as inactive.
           //
-          // Instead: derive whether the remote is offering video by inspecting
-          // the negotiated transceivers AFTER setRemoteDescription. If the remote
-          // SDP contains an active m=video line, set our video transceiver to
-          // sendrecv so both directions are enabled in the answer.
+          // RELIABLE APPROACH: After setRemoteDescription the browser has already
+          // parsed the SDP and populated each transceiver's receiver.track. Iterate
+          // transceivers directly — any transceiver that has a receiver video track
+          // means the remote is offering video. Force direction = sendrecv so our
+          // answer does not kill video.
           if (!iceRestartOffer) {
             const transceivers = pc.getTransceivers();
-            const remoteOfferHasVideo = msg.sdp && /^m=video/m.test(msg.sdp) &&
-              !/^a=inactive/m.test(msg.sdp.split("\n").filter(l => l.startsWith("m=video")).join("\n"));
-
-            // Check if remote SDP video section is not inactive/recvonly-with-no-send
-            const sdpLines = msg.sdp ? msg.sdp.split("\n") : [];
-            let inVideoSection = false;
-            let remoteVideoActive = false;
-            for (const line of sdpLines) {
-              if (line.startsWith("m=video")) { inVideoSection = true; continue; }
-              if (line.startsWith("m=") && !line.startsWith("m=video")) { inVideoSection = false; }
-              if (inVideoSection) {
-                if (line.startsWith("a=sendrecv") || line.startsWith("a=sendonly")) {
-                  remoteVideoActive = true;
-                }
+            let forcedSendrecvCount = 0;
+            for (const t of transceivers) {
+              if (t.direction === "stopped") continue;
+              const kind = t.receiver?.track?.kind;
+              // Force sendrecv for both audio and video so the answer is correct.
+              // Tracks will be attached by the post-answer syncSendersWithTracks call.
+              if ((kind === "video" || kind === "audio") && t.direction !== "sendrecv") {
+                t.direction = "sendrecv";
+                forcedSendrecvCount++;
+                logWebRTC("TRANSCEIVER_DIRECTION_FORCED", { kind, mid: t.mid, wasDirection: t.direction });
               }
             }
-
-            logWebRTC("CALLEE_VIDEO_DIRECTION_PROBE", {
-              remoteOfferHasVideo,
-              remoteVideoActive,
+            logWebRTC("CALLEE_TRANSCEIVER_PROBE", {
+              transceiverCount: transceivers.length,
+              forcedSendrecvCount,
               callType: callTypeRef.current,
               localStreamHasVideo: !!(localStreamRef.current?.getVideoTracks()[0]),
+              transceiverKinds: transceivers
+                .filter(t => t.direction !== "stopped")
+                .map(t => ({ kind: t.receiver?.track?.kind, dir: t.direction, mid: t.mid })),
             });
-
-            // If the remote is sending video, ensure OUR video transceiver is sendrecv.
-            // This prevents the negotiated answer from containing a=inactive for video.
-            if (remoteVideoActive) {
-              const videoTransceiver = transceivers.find(t => {
-                const rKind = t.receiver?.track?.kind;
-                return rKind === "video" && t.direction !== "stopped";
-              }) || transceivers.find(t => t.mid === "1" && t.direction !== "stopped");
-              if (videoTransceiver && videoTransceiver.direction !== "sendrecv") {
-                videoTransceiver.direction = "sendrecv";
-                logWebRTC("VIDEO_TRANSCEIVER_FORCED_SENDRECV", { mid: videoTransceiver.mid });
-              }
-            }
           }
-          // ── END CALLEE VIDEO FIX ─────────────────────────────────────────────
+          // ── END CALLEE VIDEO FIX (v2) ────────────────────────────────────────
 
           timelineLog("CREATE_ANSWER", { iceRestart: iceRestartOffer });
           const answer = await pc.createAnswer();
@@ -2639,7 +2625,9 @@ export default function CallManager({ user, debug }) {
         aud.play().catch(() => { });
         log.webrtc("Aggressive rewire: remoteAudioRef.srcObject set");
       }
-      if (localVideoRef.current && localStreamRef.current && localVideoRef.current.srcObject !== localStreamRef.current && (callTypeRef.current === "video" || callTypeRef.current === "blind_date")) {
+      // Gate on stream having video tracks — NOT callTypeRef, which can be stale.
+      const localHasVideo = (localStreamRef.current?.getVideoTracks().length ?? 0) > 0;
+      if (localVideoRef.current && localStreamRef.current && localVideoRef.current.srcObject !== localStreamRef.current && localHasVideo) {
         localVideoRef.current.srcObject = localStreamRef.current;
         localVideoRef.current.play().catch(() => { });
         log.webrtc("Aggressive rewire: localVideoRef.srcObject set");
@@ -2881,8 +2869,14 @@ export default function CallManager({ user, debug }) {
         }
       }
 
-      if (localVideoRef.current && needsVideo) {
+      // Use stream ground-truth (not callTypeRef) to decide whether to show local video.
+      // callTypeRef.current can be stale on the callee when setupWebRTCPeer runs,
+      // but localStreamRef always has the correct tracks from getUserMedia in acceptCall.
+      const streamHasVideo = (localStreamRef.current?.getVideoTracks().length ?? 0) > 0;
+      if (localVideoRef.current && (needsVideo || streamHasVideo)) {
         localVideoRef.current.srcObject = localStreamRef.current;
+        localVideoRef.current.play().catch(() => {});
+        logWebRTC("LOCAL_VIDEO_WIRED", { needsVideo, streamHasVideo, callType: callTypeRef.current });
       }
 
       // Attach tracks, transceivers, and data channel BEFORE creating any offer/answer (Caller only)

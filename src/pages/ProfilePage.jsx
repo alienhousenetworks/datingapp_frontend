@@ -26,7 +26,7 @@ export default function ProfilePage() {
   const [username, setUsername] = useState("");
   const [age, setAge] = useState("");
   const [bio, setBio] = useState("");
-  const [hotTake, setHotTake] = useState("");
+  const [hottakes, setHottakes] = useState([]);
   const [intent, setIntent] = useState("dating");
   const [vibes, setVibes] = useState([]);
   const [images, setImages] = useState([]);
@@ -95,6 +95,7 @@ export default function ProfilePage() {
           setSexuality(profile.sexuality || "");
           setLanguages(profile.languages || []);
           setTurnOns(profile.turn_ons || []);
+          setHottakes(profile.hottakes || []);
           
           if (profile.city) {
             setCity(profile.city);
@@ -191,7 +192,7 @@ export default function ProfilePage() {
     setSaving(true);
     try {
       // Build PATCH payload — only include fields being changed
-      const payload = { bio, languages, sexuality, turn_ons: turnOns };
+      const payload = { bio, languages, sexuality, turn_ons: turnOns, hottakes };
       if (username) payload.username = username.trim().toLowerCase();
       if (age) payload.age = parseInt(age);
       if (city) payload.city = city;
@@ -625,18 +626,72 @@ export default function ProfilePage() {
             </div>
           </div>
 
-          {/* Hot take */}
+          {/* Hot takes */}
           <div style={styles.card}>
-            <div style={styles.cardLabel}>Your Hot Take</div>
+            <div style={styles.cardLabel}>
+              Your Hot Takes{" "}
+              <span style={styles.vibeCount}>{hottakes.length}/3 selected</span>
+            </div>
             <p style={styles.fieldNote}>
-              This shows on your profile card — make it spicy 🌶
+              Add up to 3 hot takes to show on your profile — make them spicy 🌶
             </p>
-            <textarea
-              style={{ ...styles.textarea, height: 80 }}
-              value={hotTake}
-              onChange={(e) => setHotTake(e.target.value)}
-              placeholder="Unpopular opinion…"
-            />
+            {hottakes.map((take, idx) => (
+              <div key={idx} style={{ display: "flex", gap: 8, marginBottom: 10, alignItems: "center" }}>
+                <input
+                  style={{ ...styles.input, marginBottom: 0 }}
+                  value={take}
+                  onChange={(e) => {
+                    const newTakes = [...hottakes];
+                    newTakes[idx] = e.target.value;
+                    setHottakes(newTakes);
+                  }}
+                  placeholder={`Hot take #${idx + 1}`}
+                />
+                <button
+                  type="button"
+                  style={{
+                    background: "rgba(239, 68, 68, 0.2)",
+                    color: "#EF4444",
+                    border: "0.5px solid rgba(239, 68, 68, 0.4)",
+                    borderRadius: "50%",
+                    width: 32,
+                    height: 32,
+                    cursor: "pointer",
+                    fontSize: 14,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    flexShrink: 0
+                  }}
+                  onClick={() => {
+                    setHottakes(hottakes.filter((_, i) => i !== idx));
+                  }}
+                >
+                  ✕
+                </button>
+              </div>
+            ))}
+            {hottakes.length < 3 && (
+              <button
+                type="button"
+                style={{
+                  ...styles.locationBtn,
+                  width: "100%",
+                  padding: "10px",
+                  borderRadius: "12px",
+                  background: "var(--dark-700)",
+                  color: "var(--white)",
+                  border: "1px solid var(--dark-500)",
+                  cursor: "pointer",
+                  fontFamily: "var(--font-display)",
+                  fontWeight: 600,
+                  marginTop: 8
+                }}
+                onClick={() => setHottakes([...hottakes, ""])}
+              >
+                + Add Hot Take
+              </button>
+            )}
           </div>
         </div>
       </div>

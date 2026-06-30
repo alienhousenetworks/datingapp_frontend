@@ -248,6 +248,20 @@ export default function ProfileDetail({ profile, onClose, onLike, onPass }) {
           </div>
         )}
 
+        {/* Hot Takes — real API data */}
+        {profile.hottakes && profile.hottakes.length > 0 && (
+          <>
+            <div style={styles.divider} />
+            <div style={styles.sectionLabel}>Hot Takes 🌶</div>
+            {profile.hottakes.map((take, idx) => (
+              <div key={idx} style={styles.promptCard}>
+                <div style={styles.promptQ}>Hot Take #{idx + 1}</div>
+                <div style={styles.promptA}>"{take}"</div>
+              </div>
+            ))}
+          </>
+        )}
+
         {/* Prompts — mock data */}
         {prompts.length > 0 && (
           <>

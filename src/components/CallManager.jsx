@@ -1085,6 +1085,27 @@ export default function CallManager({ user, debug }) {
     } : false,
   });
 
+  const acquireLocalMedia = async (needsVideo) => {
+    try {
+      const constraints = getMediaConstraints(needsVideo);
+      return await navigator.mediaDevices.getUserMedia(constraints);
+    } catch (firstErr) {
+      log.warn("getUserMedia with ideal constraints failed, trying simple constraints:", firstErr);
+      try {
+        return await navigator.mediaDevices.getUserMedia({
+          audio: true,
+          video: needsVideo ? { width: 640, height: 480 } : false,
+        });
+      } catch (secondErr) {
+        log.warn("getUserMedia with simple constraints failed, trying minimal constraints:", secondErr);
+        return await navigator.mediaDevices.getUserMedia({
+          audio: true,
+          video: needsVideo,
+        });
+      }
+    }
+  };
+
   const assertMediaTracksReady = () => {
     const localStream = localStreamRef.current;
     if (!localStream) throw new Error("Local media stream is not available");
@@ -2845,15 +2866,18 @@ export default function CallManager({ user, debug }) {
 
       // Acquire local media if not already obtained
       const needsVideo = callTypeRef.current === "video" || callTypeRef.current === "blind_date";
-      if (!localStreamRef.current) {
+      const hasVideoTrack = (localStreamRef.current?.getVideoTracks().length ?? 0) > 0;
+      if (!localStreamRef.current || (needsVideo && !hasVideoTrack)) {
         try {
-          // Phase 8 — start with constrained resolution for mobile
-          const constraints = getMediaConstraints(needsVideo);
-          localStreamRef.current = await navigator.mediaDevices.getUserMedia(constraints);
+          if (localStreamRef.current) {
+            localStreamRef.current.getTracks().forEach(t => t.stop());
+            localStreamRef.current = null;
+          }
+          localStreamRef.current = await acquireLocalMedia(needsVideo);
           if (isStale()) return;
           log.webrtc(`Local media acquired (video=${needsVideo})`);
         } catch (mediaErr) {
-          log.warn("getUserMedia failed — using loopback placeholder:", mediaErr);
+          log.warn("acquireLocalMedia failed — using loopback placeholder:", mediaErr);
           // Safari-safe loopback placeholder
           const canvas = document.createElement("canvas");
           canvas.width = 320; canvas.height = 240;
@@ -2983,7 +3007,7 @@ export default function CallManager({ user, debug }) {
     await loadCallIntelligence(targetId);
     const needsVideo = type === "video" || type === "blind_date";
     try {
-      const stream = await navigator.mediaDevices.getUserMedia(getMediaConstraints(needsVideo));
+      const stream = await acquireLocalMedia(needsVideo);
       localStreamRef.current = stream;
       isInitiatorRef.current = true;
       setCallType(type);
@@ -2993,7 +3017,7 @@ export default function CallManager({ user, debug }) {
       sendSignaling({ action: "initiate", callee_id: targetId, call_type: type });
     } catch (err) {
       alert("⚠️ Camera/microphone access required. Check browser settings.");
-      log.error("getUserMedia failed on initiateCall:", err);
+      log.error("acquireLocalMedia failed on initiateCall:", err);
     }
   };
 
@@ -3007,11 +3031,11 @@ export default function CallManager({ user, debug }) {
     log.webrtc(`Blind Date room ${sessionId}. isInitiator=${isInitiatorRef.current}`);
 
     try {
-      const stream = await navigator.mediaDevices.getUserMedia(getMediaConstraints(true));
+      const stream = await acquireLocalMedia(true);
       localStreamRef.current = stream;
     } catch (err) {
       alert("⚠️ Camera/microphone access required for Blind Date.");
-      log.error("getUserMedia failed on joinBlindDateCall:", err);
+      log.error("acquireLocalMedia failed on joinBlindDateCall:", err);
       return;
     }
     setCallId(sessionId);
@@ -3028,9 +3052,13 @@ export default function CallManager({ user, debug }) {
       alert("⚠️ Connection lost. Cannot accept call.");
       return;
     }
-    const needsVideo = callTypeRef.current === "video" || callTypeRef.current === "blind_date";
+    const needsVideo =
+      callTypeRef.current === "video" ||
+      callTypeRef.current === "blind_date" ||
+      callType === "video" ||
+      callType === "blind_date";
     try {
-      const stream = await navigator.mediaDevices.getUserMedia(getMediaConstraints(needsVideo));
+      const stream = await acquireLocalMedia(needsVideo);
       localStreamRef.current = stream;
       isInitiatorRef.current = false;
       setIsAccepting(true);
@@ -3038,7 +3066,7 @@ export default function CallManager({ user, debug }) {
     } catch (err) {
       setIsAccepting(false);
       alert("⚠️ Camera/microphone access required to accept the call.");
-      log.error("getUserMedia failed on acceptCall:", err);
+      log.error("acquireLocalMedia failed on acceptCall:", err);
     }
   };
 

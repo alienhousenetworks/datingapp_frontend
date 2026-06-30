@@ -2564,6 +2564,11 @@ export default function CallManager({ user, debug }) {
         aud.play().catch(() => { });
         log.webrtc("Aggressive rewire: remoteAudioRef.srcObject set");
       }
+      if (localVideoRef.current && localStreamRef.current && localVideoRef.current.srcObject !== localStreamRef.current && (callTypeRef.current === "video" || callTypeRef.current === "blind_date")) {
+        localVideoRef.current.srcObject = localStreamRef.current;
+        localVideoRef.current.play().catch(() => { });
+        log.webrtc("Aggressive rewire: localVideoRef.srcObject set");
+      }
     }, 1000);
 
     return () => clearInterval(interval);
@@ -2954,7 +2959,7 @@ export default function CallManager({ user, debug }) {
       alert("⚠️ Connection lost. Cannot accept call.");
       return;
     }
-    const needsVideo = callType === "video" || callType === "blind_date";
+    const needsVideo = callTypeRef.current === "video" || callTypeRef.current === "blind_date";
     try {
       const stream = await navigator.mediaDevices.getUserMedia(getMediaConstraints(needsVideo));
       localStreamRef.current = stream;

@@ -120,7 +120,7 @@ export default function ProfilePage() {
                 } catch {}
               },
               () => {},
-              { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+              { enableHighAccuracy: false, timeout: 10000, maximumAge: 300000 }
             );
           }
         }
@@ -267,7 +267,7 @@ export default function ProfilePage() {
         alert("Location access denied or timed out");
         setLocationLoading(false);
       },
-      { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+      { enableHighAccuracy: false, timeout: 10000, maximumAge: 300000 }
     );
   };
 

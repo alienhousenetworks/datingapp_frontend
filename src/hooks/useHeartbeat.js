@@ -41,7 +41,7 @@ export default function useHeartbeat(active = true) {
             } catch {}
           }
         },
-        { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+        { enableHighAccuracy: false, timeout: 10000, maximumAge: 300000 }
       );
     } else {
       // Geolocation not supported, try to get from profile

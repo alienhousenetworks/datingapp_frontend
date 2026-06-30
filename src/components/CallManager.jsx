@@ -2010,7 +2010,19 @@ export default function CallManager({ user, debug }) {
         kind: event.track?.kind,
         fallback: !eventStream,
         totalTracks: remoteStream.getTracks().length,
+        trackEnabled: event.track?.enabled,
+        trackReadyState: event.track?.readyState,
       });
+
+      // Update debug status when video track arrives
+      if (event.track?.kind === "video") {
+        setRemoteTrackStatus("Video track received");
+        logWebRTC("REMOTE_VIDEO_TRACK_ARRIVED", {
+          id: event.track.id,
+          readyState: event.track.readyState,
+          enabled: event.track.enabled,
+        });
+      }
 
       const video = remoteVideoRef.current;
       if (video) {
@@ -2172,9 +2184,56 @@ export default function CallManager({ user, debug }) {
           remoteDescriptionAppliedRef.current = true;
           await flushIceCandidates();
 
+          // ── CALLEE VIDEO FIX ────────────────────────────────────────────────
+          // Do NOT call syncSendersWithTracks() here. callTypeRef.current may
+          // still be stale (React state hasn't flushed) when this async handler
+          // runs, which causes the video transceiver to be set to 'inactive' —
+          // the root cause of the blank-video bug.
+          //
+          // Instead: derive whether the remote is offering video by inspecting
+          // the negotiated transceivers AFTER setRemoteDescription. If the remote
+          // SDP contains an active m=video line, set our video transceiver to
+          // sendrecv so both directions are enabled in the answer.
           if (!iceRestartOffer) {
-            await syncSendersWithTracks(pc);
+            const transceivers = pc.getTransceivers();
+            const remoteOfferHasVideo = msg.sdp && /^m=video/m.test(msg.sdp) &&
+              !/^a=inactive/m.test(msg.sdp.split("\n").filter(l => l.startsWith("m=video")).join("\n"));
+
+            // Check if remote SDP video section is not inactive/recvonly-with-no-send
+            const sdpLines = msg.sdp ? msg.sdp.split("\n") : [];
+            let inVideoSection = false;
+            let remoteVideoActive = false;
+            for (const line of sdpLines) {
+              if (line.startsWith("m=video")) { inVideoSection = true; continue; }
+              if (line.startsWith("m=") && !line.startsWith("m=video")) { inVideoSection = false; }
+              if (inVideoSection) {
+                if (line.startsWith("a=sendrecv") || line.startsWith("a=sendonly")) {
+                  remoteVideoActive = true;
+                }
+              }
+            }
+
+            logWebRTC("CALLEE_VIDEO_DIRECTION_PROBE", {
+              remoteOfferHasVideo,
+              remoteVideoActive,
+              callType: callTypeRef.current,
+              localStreamHasVideo: !!(localStreamRef.current?.getVideoTracks()[0]),
+            });
+
+            // If the remote is sending video, ensure OUR video transceiver is sendrecv.
+            // This prevents the negotiated answer from containing a=inactive for video.
+            if (remoteVideoActive) {
+              const videoTransceiver = transceivers.find(t => {
+                const rKind = t.receiver?.track?.kind;
+                return rKind === "video" && t.direction !== "stopped";
+              }) || transceivers.find(t => t.mid === "1" && t.direction !== "stopped");
+              if (videoTransceiver && videoTransceiver.direction !== "sendrecv") {
+                videoTransceiver.direction = "sendrecv";
+                logWebRTC("VIDEO_TRANSCEIVER_FORCED_SENDRECV", { mid: videoTransceiver.mid });
+              }
+            }
           }
+          // ── END CALLEE VIDEO FIX ─────────────────────────────────────────────
 
           timelineLog("CREATE_ANSWER", { iceRestart: iceRestartOffer });
           const answer = await pc.createAnswer();
@@ -2187,6 +2246,22 @@ export default function CallManager({ user, debug }) {
           timelineBump("answersSent", { iceRestart: iceRestartOffer });
           timelineLog("ANSWER_SENT", { iceRestart: iceRestartOffer });
           logWebRTC("SDP_ANSWER_SENT", { iceRestart: iceRestartOffer });
+
+          // Post-answer: attach local tracks to senders now that React state
+          // has had time to flush (callTypeRef is authoritative by this point).
+          // Scheduling via setTimeout(0) ensures we don't block the answer path.
+          if (!iceRestartOffer) {
+            setTimeout(async () => {
+              if (pcRef.current && localStreamRef.current) {
+                try {
+                  await syncSendersWithTracks(pcRef.current);
+                  logWebRTC("POST_ANSWER_SYNC_SENDERS_DONE", { callType: callTypeRef.current });
+                } catch (syncErr) {
+                  log.warn("Post-answer syncSendersWithTracks failed:", syncErr);
+                }
+              }
+            }, 0);
+          }
 
           if (!iceRestartOffer) {
             markNegotiationComplete();

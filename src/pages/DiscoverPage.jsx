@@ -55,7 +55,6 @@ function mapFeedItem(r) {
 
 export default function DiscoverPage({ user, setTab }) {
   const [profiles, setProfiles] = useState([]);
-  const [selected, setSelected] = useState(null);
   const [toast, setToast] = useState(null);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -181,7 +180,6 @@ export default function DiscoverPage({ user, setTab }) {
       } else {
         showToast(`♥ You liked ${profile.username ? `@${profile.username}` : "them"}!`);
       }
-      setSelected(null);
     } catch (err) {
       if (err.status === 403 && err.data?.code === "subscription_required") {
         setShowPaywall(true);
@@ -201,7 +199,6 @@ export default function DiscoverPage({ user, setTab }) {
       await interactionAPI.pass(profile.id);
       showToast(`Passed on ${profile.username ? `@${profile.username}` : "them"}`);
       setProfiles((ps) => ps.filter((p) => p.id !== profile.id));
-      setSelected(null);
     } catch (err) {
       if (err.status === 403 && err.data?.code === "subscription_required") {
         setShowPaywall(true);

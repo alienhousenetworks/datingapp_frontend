@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from "react";
 import { interactionAPI, moderationAPI } from "../api";
-import { resolveThemeStyles, LAYOUT_PATTERNS } from "../utils/themeCatalog";
+import { resolveThemeStyles } from "../utils/themeCatalog";
 import { getGenderLabel, getSexualityLabel, getMoodLabel } from "../utils/profileLabels";
 import { LAPTOP_MIN_WIDTH } from "../constants/breakpoints";
 import feedCss from "../styles/FeedProfileItem.module.css";
@@ -56,7 +56,6 @@ const MobileFeedCard = ({ profile, handleLike, setFullScreenImage, themeStyles, 
     }
   };
 
-  const current = images[photoIdx] || null;
   const moodLabel = getMoodLabel(profile);
 
   const touchStartRef = useRef(null);

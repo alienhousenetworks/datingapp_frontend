@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from "react";
-import { callAPI, getValidAccessToken, wsURL, authAPI } from "../api";
+import { callAPI, wsURL, authAPI } from "../api";
 import callCss from "../styles/CallManager.module.css";
 
 // ─────────────────────────────────────────────────────────────────────────────

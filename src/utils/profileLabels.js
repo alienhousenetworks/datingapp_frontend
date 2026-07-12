@@ -30,5 +30,5 @@ export function getMoodLabel(profile) {
   }
   const legacyMood = profile?.current_mood;
   if (legacyMood && !isUuid(legacyMood)) return legacyMood;
-  return getIntentLabel(profile);
+  return null;
 }

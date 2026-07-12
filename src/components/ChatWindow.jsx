@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from "react";
-import { chatAPI, getValidAccessToken, wsURL, API_BASE_URL, authAPI } from "../api";
+import { chatAPI, wsURL, API_BASE_URL, authAPI } from "../api";
 import { getUserDisplayName, getUserInitial } from "../utils/userDisplay";
 
 const getAbsoluteMediaUrl = (url) => {
@@ -39,9 +39,6 @@ export default function ChatWindow({ conversation, onDeleteConversation, onConve
   const [selectedFile, setSelectedFile] = useState(null);
   const [previewUrl, setPreviewUrl] = useState(null);
   const [mediaType, setMediaType] = useState("");
-
-  const [showUnmatchModal, setShowUnmatchModal] = useState(false);
-  const [unmatching, setUnmatching] = useState(false);
 
 
   // Countdown effect for active media message
@@ -678,22 +675,7 @@ export default function ChatWindow({ conversation, onDeleteConversation, onConve
     }
   };
 
-  const handleUnmatchConfirm = async () => {
-    if (!conversation?.id) return;
-    setUnmatching(true);
-    try {
-      await chatAPI.deleteConversation(conversation.id);
-      setShowUnmatchModal(false);
-      if (onDeleteConversation) {
-        onDeleteConversation();
-      }
-    } catch (err) {
-      console.error("Failed to unmatch", err);
-      alert("Failed to unmatch. Please try again.");
-    } finally {
-      setUnmatching(false);
-    }
-  };
+
 
   const handleLeaveChat = async () => {
     if (!window.confirm("Are you sure you want to leave this chat? It will be hidden and you will be unmatched.")) return;

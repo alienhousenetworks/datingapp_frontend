@@ -23,7 +23,7 @@ import CallManager from "./components/CallManager";
 import useAuth from "./hooks/useAuth";
 import useHeartbeat from "./hooks/useHeartbeat";
 import useSubscription from "./hooks/useSubscription";
-import { profileAPI, wsURL, getValidAccessToken, authAPI } from "./api";
+import { profileAPI, wsURL, authAPI } from "./api";
 import { useEffect } from "react";
 import SubscriptionPaywall from "./components/SubscriptionPaywall";
 

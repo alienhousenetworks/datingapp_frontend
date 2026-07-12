@@ -1,26 +1,8 @@
 import React, { useState, useEffect, useRef } from "react";
-import { profileAPI, verificationAPI, geoAPI, optionsAPI, imageAPI, subscriptionAPI } from "../api";
+import { profileAPI, verificationAPI, geoAPI, optionsAPI, imageAPI } from "../api";
 import useSubscription from "../hooks/useSubscription";
 import profileStyles from "../styles/ProfilePage.module.css";
 import ThemeSettings from "../components/ThemeSettings";
-
-const ALL_VIBES = [
-  "dry texter",
-  "f1 fanatic",
-  "memer",
-  "night owl",
-  "foodie",
-  "traveller",
-  "gym rat",
-  "bookworm",
-  "introvert",
-  "extrovert",
-  "overthinker",
-  "dog person",
-  "cat person",
-  "coffee addict",
-  "music nerd",
-];
 
 export default function ProfilePage() {
   const [username, setUsername] = useState("");
@@ -28,7 +10,6 @@ export default function ProfilePage() {
   const [bio, setBio] = useState("");
   const [hottakes, setHottakes] = useState([]);
   const [intent, setIntent] = useState("dating");
-  const [vibes, setVibes] = useState([]);
   const [images, setImages] = useState([]);
   const [verification, setVerification] = useState(null);
   const [saved, setSaved] = useState(false);
@@ -100,10 +81,7 @@ export default function ProfilePage() {
           if (profile.city) {
             setCity(profile.city);
           }
-          // turn_ons as vibes
-          if (profile.turn_ons?.length > 0) {
-            setVibes(profile.turn_ons.map((t) => t.name || t));
-          }
+
           // Load location if possible (and not already set)
           if ((!profile.latitude || !profile.longitude) && navigator.geolocation) {
             navigator.geolocation.getCurrentPosition(
@@ -132,8 +110,7 @@ export default function ProfilePage() {
     load();
   }, []);
 
-  const toggleVibe = (v) =>
-    setVibes((vs) => (vs.includes(v) ? vs.filter((x) => x !== v) : [...vs, v]));
+
 
   const handleSlotClick = (imgId = null) => {
     setReplaceImageId(imgId);

@@ -500,19 +500,33 @@ export const chatAPI = {
     return res.json();
   },
 
-  // Get conversation message draft
+  // Get conversation message draft (soft-fail: empty content on 403/404)
   getDraft: async (conversationId) => {
-    const res = await apiFetch(`/conversations/${conversationId}/draft/`);
-    return res.json();
+    try {
+      const res = await apiFetch(`/conversations/${conversationId}/draft/`);
+      return res.json();
+    } catch (err) {
+      if (err && (err.status === 403 || err.status === 404)) {
+        return { content: "" };
+      }
+      throw err;
+    }
   },
 
-  // Save conversation message draft
+  // Save conversation message draft (soft-fail: ignore auth/sub edge cases)
   saveDraft: async (conversationId, content) => {
-    const res = await apiFetch(`/conversations/${conversationId}/draft/`, {
-      method: "POST",
-      body: JSON.stringify({ content }),
-    });
-    return res.json();
+    try {
+      const res = await apiFetch(`/conversations/${conversationId}/draft/`, {
+        method: "POST",
+        body: JSON.stringify({ content }),
+      });
+      return res.json();
+    } catch (err) {
+      if (err && (err.status === 403 || err.status === 404)) {
+        return { content: content || "" };
+      }
+      throw err;
+    }
   },
 
   // React to message (Add/Toggle)

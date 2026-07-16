@@ -19,7 +19,21 @@ export default function useHeartbeat(active = true) {
       } catch {}
     };
 
+    const useProfileLocation = async () => {
+      if (!localStorage.getItem("access_token")) return;
+      try {
+        const profile = await profileAPI.getMyProfile();
+        if (profile && profile.latitude && profile.longitude) {
+          const lat = parseFloat(profile.latitude);
+          const lon = parseFloat(profile.longitude);
+          locationRef.current = { lat, lon };
+          sendPing(lat, lon);
+        }
+      } catch {}
+    };
+
     if (navigator.geolocation) {
+      // maximumAge allows cached GPS — reduces kCLErrorLocationUnknown spam
       navigator.geolocation.getCurrentPosition(
         (pos) => {
           const lat = pos.coords.latitude;
@@ -28,36 +42,15 @@ export default function useHeartbeat(active = true) {
           sendPing(lat, lon);
         },
         async () => {
-          // If denied or timed out, try to get from profile
-          if (!hasPingedRef.current && localStorage.getItem("access_token")) {
-            try {
-              const profile = await profileAPI.getMyProfile();
-              if (profile && profile.latitude && profile.longitude) {
-                const lat = parseFloat(profile.latitude);
-                const lon = parseFloat(profile.longitude);
-                locationRef.current = { lat, lon };
-                sendPing(lat, lon);
-              }
-            } catch {}
+          // Denied / unknown / timeout — fall back to profile coords (no hard fail)
+          if (!hasPingedRef.current) {
+            await useProfileLocation();
           }
         },
-        { enableHighAccuracy: false, timeout: 10000, maximumAge: 300000 }
+        { enableHighAccuracy: false, timeout: 8000, maximumAge: 600000 }
       );
     } else {
-      // Geolocation not supported, try to get from profile
-      if (localStorage.getItem("access_token")) {
-        (async () => {
-          try {
-            const profile = await profileAPI.getMyProfile();
-            if (profile && profile.latitude && profile.longitude) {
-              const lat = parseFloat(profile.latitude);
-              const lon = parseFloat(profile.longitude);
-              locationRef.current = { lat, lon };
-              sendPing(lat, lon);
-            }
-          } catch {}
-        })();
-      }
+      useProfileLocation();
     }
 
     // Set up subsequent pings every 5 minutes

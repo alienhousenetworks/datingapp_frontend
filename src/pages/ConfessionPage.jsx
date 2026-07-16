@@ -1,6 +1,6 @@
 // src/pages/ConfessionPage.jsx
 import React, { useState, useEffect } from "react";
-import { socialAPI, profileAPI, geoAPI, moderationAPI } from "../api";
+import { socialAPI, profileAPI, moderationAPI } from "../api";
 import confessionStyles from "../styles/ConfessionPage.module.css";
 
 /**

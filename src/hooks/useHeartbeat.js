@@ -19,7 +19,8 @@ export default function useHeartbeat(active = true) {
       } catch {}
     };
 
-    const useProfileLocation = async () => {
+    // NOTE: do not name helpers "use*" — eslint-plugin-react-hooks treats them as Hooks
+    const loadCoordsFromProfile = async () => {
       if (!localStorage.getItem("access_token")) return;
       try {
         const profile = await profileAPI.getMyProfile();
@@ -44,13 +45,13 @@ export default function useHeartbeat(active = true) {
         async () => {
           // Denied / unknown / timeout — fall back to profile coords (no hard fail)
           if (!hasPingedRef.current) {
-            await useProfileLocation();
+            await loadCoordsFromProfile();
           }
         },
         { enableHighAccuracy: false, timeout: 8000, maximumAge: 600000 }
       );
     } else {
-      useProfileLocation();
+      loadCoordsFromProfile();
     }
 
     // Set up subsequent pings every 5 minutes

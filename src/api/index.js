@@ -500,32 +500,61 @@ export const chatAPI = {
     return res.json();
   },
 
-  // Get conversation message draft (soft-fail: empty content on 403/404)
-  getDraft: async (conversationId) => {
+  // Local-first drafts (always works; server sync is best-effort)
+  _draftKey: (conversationId) => `chat_draft_${conversationId}`,
+
+  getLocalDraft: (conversationId) => {
     try {
-      const res = await apiFetch(`/conversations/${conversationId}/draft/`);
-      return res.json();
-    } catch (err) {
-      if (err && (err.status === 403 || err.status === 404)) {
-        return { content: "" };
-      }
-      throw err;
+      return localStorage.getItem(chatAPI._draftKey(conversationId)) || "";
+    } catch {
+      return "";
     }
   },
 
-  // Save conversation message draft (soft-fail: ignore auth/sub edge cases)
+  setLocalDraft: (conversationId, content) => {
+    try {
+      const key = chatAPI._draftKey(conversationId);
+      if (!content) localStorage.removeItem(key);
+      else localStorage.setItem(key, content);
+    } catch {
+      /* ignore quota */
+    }
+  },
+
+  // Get draft: localStorage first, optional silent server merge
+  getDraft: async (conversationId) => {
+    const local = chatAPI.getLocalDraft(conversationId);
+    // Best-effort server load without throwing red UX; network may still 403
+    // until backend deploy — we never block the UI on it.
+    try {
+      const res = await apiFetch(`/conversations/${conversationId}/draft/`);
+      const data = await res.json();
+      const remote = (data && data.content) || "";
+      if (remote && !local) {
+        chatAPI.setLocalDraft(conversationId, remote);
+        return { content: remote };
+      }
+      if (local && remote !== local) {
+        // Prefer local typing in progress
+        return { content: local };
+      }
+      return { content: local || remote || "" };
+    } catch {
+      return { content: local || "" };
+    }
+  },
+
+  // Save draft: always local; fire-and-forget server
   saveDraft: async (conversationId, content) => {
+    chatAPI.setLocalDraft(conversationId, content || "");
     try {
       const res = await apiFetch(`/conversations/${conversationId}/draft/`, {
         method: "POST",
-        body: JSON.stringify({ content }),
+        body: JSON.stringify({ content: content || "" }),
       });
       return res.json();
-    } catch (err) {
-      if (err && (err.status === 403 || err.status === 404)) {
-        return { content: content || "" };
-      }
-      throw err;
+    } catch {
+      return { content: content || "" };
     }
   },
 

@@ -309,26 +309,26 @@ export default function ChatWindow({ conversation, onDeleteConversation, onConve
   }, [messages, typing]);
 
   const loadDraft = async () => {
+    if (!conversation?.id) return;
+    // Instant local draft (no network required)
+    const local = chatAPI.getLocalDraft(conversation.id);
+    if (local) setInput(local);
     try {
       const draft = await chatAPI.getDraft(conversation.id);
-      if (draft && draft.content) {
+      if (draft && draft.content && !local) {
         setInput(draft.content);
-      } else {
-        setInput("");
       }
     } catch {
-      setInput("");
+      /* local draft already applied */
     }
   };
 
-  // Debounced draft save
+  // Debounced draft save (local + best-effort server)
   useEffect(() => {
     if (!conversation?.id) return;
-    const delayDebounceFn = setTimeout(async () => {
-      try {
-        await chatAPI.saveDraft(conversation.id, input);
-      } catch {}
-    }, 1000);
+    const delayDebounceFn = setTimeout(() => {
+      chatAPI.saveDraft(conversation.id, input).catch(() => {});
+    }, 400);
 
     return () => clearTimeout(delayDebounceFn);
   }, [input, conversation?.id]);

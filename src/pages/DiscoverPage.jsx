@@ -103,8 +103,21 @@ export default function DiscoverPage({ user, setTab }) {
   }, [activeFilter, isLocked, showPaywall, profiles.length, loading]);
 
   useEffect(() => {
-    optionsAPI.getIntents().then(setIntentOpts).catch(() => {});
-    optionsAPI.getGenders().then(setGenderOpts).catch(() => {});
+    let cancelled = false;
+    (async () => {
+      try {
+        // Sequential load shares one token refresh (avoids parallel refresh race)
+        const intents = await optionsAPI.getIntents();
+        if (!cancelled) setIntentOpts(Array.isArray(intents) ? intents : intents?.results || []);
+        const genders = await optionsAPI.getGenders();
+        if (!cancelled) setGenderOpts(Array.isArray(genders) ? genders : genders?.results || []);
+      } catch {
+        /* options are non-critical for feed display */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const loadFeed = useCallback(async (cur = 0, activeFilters = filters, append = false) => {

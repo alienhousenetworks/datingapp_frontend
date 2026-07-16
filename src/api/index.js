@@ -36,6 +36,108 @@ export const authHeaders = () => ({
   Authorization: `Bearer ${getAccessToken()}`,
 });
 
+// ─── Single-flight refresh (prevents ROTATE_REFRESH_TOKENS race → 401 storm)
+let _refreshInFlight = null;
+let _redirectingToLogin = false;
+
+const getErrorMessage = (errorData, status) => {
+  if (!errorData) return `HTTP error! status: ${status}`;
+  if (errorData.detail) return errorData.detail;
+  if (errorData.message) return errorData.message;
+  if (errorData.error) return errorData.error;
+  if (typeof errorData === "object" && !Array.isArray(errorData)) {
+    const values = Object.values(errorData).flat();
+    if (values.length > 0) return values.join(" ");
+  }
+  return `HTTP error! status: ${status}`;
+};
+
+function forceLogoutToLogin() {
+  if (_redirectingToLogin) return;
+  _redirectingToLogin = true;
+  clearTokens();
+  try {
+    Object.keys(sessionStorage)
+      .filter((k) => k.startsWith("opt_cache_"))
+      .forEach((k) => sessionStorage.removeItem(k));
+  } catch {
+    /* ignore */
+  }
+  if (typeof window !== "undefined" && !window.location.pathname.match(/^\/?$/)) {
+    window.location.href = "/";
+  }
+}
+
+// ─── Token refresh ───────────────────────────────────────────
+export async function refreshAccessToken() {
+  // Deduplicate concurrent refresh calls (Discover fires many apiFetch in parallel)
+  if (_refreshInFlight) return _refreshInFlight;
+
+  _refreshInFlight = (async () => {
+    try {
+      const refresh = getRefreshToken();
+      if (!refresh) return false;
+
+      const res = await fetch(`${BASE_URL}/token/refresh/`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ refresh }),
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        // Always store rotated refresh when server returns one
+        saveTokens(data.access, data.refresh || refresh);
+        return true;
+      }
+
+      // Invalid/blacklisted/expired refresh — session is dead
+      if (res.status === 401 || res.status === 403) {
+        return false;
+      }
+      return false;
+    } catch {
+      return false;
+    } finally {
+      _refreshInFlight = null;
+    }
+  })();
+
+  return _refreshInFlight;
+}
+
+export const getValidAccessToken = async () => {
+  const token = getAccessToken();
+  if (!token) return null;
+  try {
+    const parts = token.split(".");
+    if (parts.length !== 3) return token;
+
+    const base64Url = parts[1];
+    const base64 = base64Url.replace(/-/g, "+").replace(/_/g, "/");
+    const payload = JSON.parse(
+      decodeURIComponent(
+        atob(base64)
+          .split("")
+          .map((c) => "%" + ("00" + c.charCodeAt(0).toString(16)).slice(-2))
+          .join("")
+      )
+    );
+
+    const now = Math.floor(Date.now() / 1000);
+    // Refresh a bit early so parallel page loads share one refresh
+    if (payload.exp - now < 60) {
+      const refreshed = await refreshAccessToken();
+      if (refreshed) return getAccessToken();
+      // Token expired and refresh failed
+      if (payload.exp <= now) return null;
+    }
+  } catch (err) {
+    console.error("Error verifying access token expiration:", err);
+  }
+  return token;
+};
+
 // ─── Core fetch wrapper (handles 401 → auto-refresh) ─────────
 async function apiFetch(path, options = {}) {
   const url = `${BASE_URL}${path}`;
@@ -52,23 +154,11 @@ async function apiFetch(path, options = {}) {
     headers,
   });
 
-  const getErrorMessage = (errorData, status) => {
-    if (!errorData) return `HTTP error! status: ${status}`;
-    if (errorData.detail) return errorData.detail;
-    if (errorData.message) return errorData.message;
-    if (errorData.error) return errorData.error;
-    if (typeof errorData === "object" && !Array.isArray(errorData)) {
-      const values = Object.values(errorData).flat();
-      if (values.length > 0) return values.join(" ");
-    }
-    return `HTTP error! status: ${status}`;
-  };
-
-  // Token expired → try to refresh once
+  // Token expired / revoked → single refresh then one retry
   if (res.status === 401) {
     const refreshed = await refreshAccessToken();
     if (refreshed) {
-      const retryToken = await getValidAccessToken();
+      const retryToken = getAccessToken();
       const retryHeaders = {
         "Content-Type": "application/json",
         "X-App-Version": APP_VERSION,
@@ -80,6 +170,12 @@ async function apiFetch(path, options = {}) {
         headers: retryHeaders,
       });
       if (!retryRes.ok) {
+        if (retryRes.status === 401) {
+          forceLogoutToLogin();
+          const err = new Error("Session expired. Please log in again.");
+          err.status = 401;
+          throw err;
+        }
         const errorData = await retryRes.json().catch(() => ({}));
         const err = new Error(getErrorMessage(errorData, retryRes.status));
         err.status = retryRes.status;
@@ -87,11 +183,11 @@ async function apiFetch(path, options = {}) {
         throw err;
       }
       return retryRes;
-    } else {
-      clearTokens();
-      window.location.href = "/"; // back to login
-      return;
     }
+    forceLogoutToLogin();
+    const err = new Error("Session expired. Please log in again.");
+    err.status = 401;
+    throw err;
   }
 
   if (!res.ok) {
@@ -105,55 +201,28 @@ async function apiFetch(path, options = {}) {
   return res;
 }
 
-// ─── Token refresh ───────────────────────────────────────────
-export async function refreshAccessToken() {
+// Session-cached master options (cuts /genders 429 + auth load)
+async function fetchOptionsCached(path, cacheKey, ttlMs = 60 * 60 * 1000) {
   try {
-    const res = await fetch(`${BASE_URL}/token/refresh/`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ refresh: getRefreshToken() }),
-    });
-    if (res.ok) {
-      const data = await res.json();
-      saveTokens(data.access, data.refresh || getRefreshToken());
-      return true;
-    }
-    return false;
-  } catch {
-    return false;
-  }
-}
-
-export const getValidAccessToken = async () => {
-  const token = getAccessToken();
-  if (!token) return null;
-  try {
-    const parts = token.split('.');
-    if (parts.length !== 3) return token;
-
-    const base64Url = parts[1];
-    const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
-    const payload = JSON.parse(
-      decodeURIComponent(
-        atob(base64)
-          .split('')
-          .map((c) => '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2))
-          .join('')
-      )
-    );
-
-    const now = Math.floor(Date.now() / 1000);
-    if (payload.exp - now < 30) {
-      const refreshed = await refreshAccessToken();
-      if (refreshed) {
-        return getAccessToken();
+    const raw = sessionStorage.getItem(cacheKey);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed && parsed.t && Date.now() - parsed.t < ttlMs && parsed.data != null) {
+        return parsed.data;
       }
     }
-  } catch (err) {
-    console.error("Error verifying access token expiration:", err);
+  } catch {
+    /* ignore */
   }
-  return token;
-};
+  const res = await apiFetch(path);
+  const data = await res.json();
+  try {
+    sessionStorage.setItem(cacheKey, JSON.stringify({ t: Date.now(), data }));
+  } catch {
+    /* ignore quota */
+  }
+  return data;
+}
 
 
 // ============================================================
@@ -618,33 +687,16 @@ export const moodAPI = {
 };
 
 // ============================================================
-// MASTER OPTIONS
+// MASTER OPTIONS (session-cached — avoids burst throttle / 429)
 // ============================================================
 export const optionsAPI = {
-  getIntents: async () => {
-    const r = await apiFetch("/intents/");
-    return r.json();
-  },
-  getTurnOns: async () => {
-    const r = await apiFetch("/turn_ons/");
-    return r.json();
-  },
-  getLanguages: async () => {
-    const r = await apiFetch("/languages/");
-    return r.json();
-  },
-  getMoodOpts: async () => {
-    const r = await apiFetch("/mood_options/");
-    return r.json();
-  },
-  getGenders: async () => {
-    const r = await apiFetch("/genders/");
-    return r.json();
-  },
-  getSexualities: async () => {
-    const r = await apiFetch("/sexualities/");
-    return r.json();
-  },
+  getIntents: () => fetchOptionsCached("/intents/", "opt_cache_intents"),
+  getTurnOns: () => fetchOptionsCached("/turn_ons/", "opt_cache_turn_ons"),
+  getLanguages: () => fetchOptionsCached("/languages/", "opt_cache_languages"),
+  getMoodOpts: () => fetchOptionsCached("/mood_options/", "opt_cache_moods"),
+  getGenders: () => fetchOptionsCached("/genders/", "opt_cache_genders"),
+  getSexualities: () =>
+    fetchOptionsCached("/sexualities/", "opt_cache_sexualities"),
 };
 
 // ============================================================

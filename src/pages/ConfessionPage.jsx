@@ -3,7 +3,8 @@ import React, { useState, useEffect } from "react";
 import { socialAPI, profileAPI, geoAPI, moderationAPI } from "../api";
 import confessionStyles from "../styles/ConfessionPage.module.css";
 
-const getCoordinates = () => {
+// Short timeout — never block confession feed on GPS (was 10s freeze).
+const getCoordinates = (timeoutMs = 2500) => {
   return new Promise((resolve, reject) => {
     if (!navigator.geolocation) {
       reject(new Error("Geolocation not supported"));
@@ -19,7 +20,7 @@ const getCoordinates = () => {
       (err) => {
         reject(err);
       },
-      { enableHighAccuracy: false, timeout: 10000, maximumAge: 300000 }
+      { enableHighAccuracy: false, timeout: timeoutMs, maximumAge: 600000 }
     );
   });
 };
@@ -108,52 +109,69 @@ export default function ConfessionPage() {
     let detectedCoords = null;
     let locationName = "";
 
-    // 1. Try browser geolocation with high accuracy
+    // 1. Instant: use profile coords only (no GPS wait)
     try {
-      detectedCoords = await getCoordinates();
-    } catch (err) {
-      console.warn("Browser geolocation failed:", err);
-    }
-
-    // 2. Fall back to profile coords
-    if (!detectedCoords) {
-      try {
-        const profile = await profileAPI.getMyProfile();
-        if (profile && profile.latitude && profile.longitude) {
-          detectedCoords = {
-            lat: parseFloat(profile.latitude),
-            lon: parseFloat(profile.longitude),
-          };
-          locationName = profile.city || "";
-        }
-      } catch (err) {
-        console.error("Profile load failed:", err);
+      const profile = await profileAPI.getMyProfile();
+      if (profile && profile.latitude && profile.longitude) {
+        detectedCoords = {
+          lat: parseFloat(profile.latitude),
+          lon: parseFloat(profile.longitude),
+        };
+        locationName = profile.city || "";
       }
-    } else {
-      // Dynamic reverse geocode to get city name
-      try {
-        const geo = await geoAPI.reverseGeocode(detectedCoords.lat, detectedCoords.lon);
-        if (geo && geo.display_name) {
-          // Keep it short
-          locationName = geo.city || geo.display_name.split(",")[0] || geo.display_name;
-        }
-      } catch {}
+    } catch (err) {
+      console.error("Profile load failed:", err);
     }
 
     setCoords(detectedCoords);
     setProfileLocationName(locationName);
 
+    // 2. Load feed immediately (global if no coords)
     try {
       const latParam = detectedCoords ? detectedCoords.lat : "";
       const lonParam = detectedCoords ? detectedCoords.lon : "";
-      const data = await socialAPI.getFeed(latParam, lonParam);
-      const results = Array.isArray(data) ? data : data.results || [];
+      let data = await socialAPI.getFeed(latParam, lonParam);
+      let results = Array.isArray(data) ? data : data.results || [];
+      // Fallback to global if geo hybrid empty/errors
+      if (!results.length && (latParam || lonParam)) {
+        data = await socialAPI.getFeed("", "");
+        results = Array.isArray(data) ? data : data.results || [];
+      }
       setConfessions(results);
     } catch (err) {
       console.error("Error loading confessions:", err);
-      setConfessions([]);
+      try {
+        const data = await socialAPI.getFeed("", "");
+        setConfessions(Array.isArray(data) ? data : data.results || []);
+      } catch {
+        setConfessions([]);
+      }
     } finally {
       setLoading(false);
+    }
+
+    // 3. Optional short GPS (background) — refresh feed if we get coords
+    try {
+      const gps = await getCoordinates(2500);
+      if (gps?.lat && gps?.lon) {
+        setCoords(gps);
+        try {
+          const geo = await geoAPI.reverseGeocode(gps.lat, gps.lon);
+          if (geo && geo.display_name) {
+            setProfileLocationName(
+              geo.city || geo.display_name.split(",")[0] || geo.display_name
+            );
+          }
+        } catch {}
+        try {
+          const data = await socialAPI.getFeed(gps.lat, gps.lon);
+          const results = Array.isArray(data) ? data : data.results || [];
+          if (results.length) setConfessions(results);
+        } catch {}
+      }
+    } catch (err) {
+      // Geolocation timeout is expected — feed already loaded
+      console.warn("Browser geolocation skipped:", err?.message || err);
     }
   };
 

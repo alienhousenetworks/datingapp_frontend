@@ -43,7 +43,7 @@ const DEFAULT_FILTERS = {
 };
 
 function mapFeedItem(r) {
-  const profile = r.profile || r;
+  const profile = r.profile_card || r.profile || r;
   return {
     id: r.id || profile.user_id || profile.id,
     ...profile,

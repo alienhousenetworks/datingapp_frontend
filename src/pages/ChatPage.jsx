@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import ChatWindow from "../components/ChatWindow";
 import { chatAPI } from "../api";
 import chatStyles from "../styles/ChatPage.module.css";
@@ -19,12 +19,21 @@ export default function ChatPage({ initialMatch }) {
   const [activeConv, setActiveConv] = useState(null);
   const [loading, setLoading] = useState(true);
 
+  const loadInFlight = useRef(false);
+  const loadQueued = useRef(false);
+
   const loadConversations = async (keepActive = true) => {
+    // Coalesce rapid reloads (WS events + mount) to avoid /conversations 429
+    if (loadInFlight.current) {
+      loadQueued.current = true;
+      return;
+    }
+    loadInFlight.current = true;
     try {
       const data = await chatAPI.getConversations();
-      const convs = data || [];
+      const convs = Array.isArray(data) ? data : data?.results || [];
       setConversations(convs);
-      
+
       if (!keepActive) {
         if (initialMatch?.conversationId) {
           const found = convs.find((c) => c.id === initialMatch.conversationId);
@@ -42,16 +51,21 @@ export default function ChatPage({ initialMatch }) {
             return convs[0] || null;
           }
           const updated = convs.find((c) => c.id === prevActive.id);
-          // If the conversation no longer exists in the API response (e.g. unmatched/deleted),
-          // clear activeConv instead of keeping the stale reference. Keeping it would cause
-          // ChatWindow to open a WS to a room the user is no longer a participant of (→ 403 loop).
           return updated || null;
         });
       }
-    } catch {
-      setConversations([]);
+    } catch (err) {
+      if (err?.status !== 429) {
+        setConversations([]);
+      }
+      // On 429 keep previous list — do not wipe inbox
     } finally {
       setLoading(false);
+      loadInFlight.current = false;
+      if (loadQueued.current) {
+        loadQueued.current = false;
+        setTimeout(() => loadConversations(true), 1500);
+      }
     }
   };
 
@@ -60,12 +74,16 @@ export default function ChatPage({ initialMatch }) {
   }, [initialMatch?.conversationId]);
 
   useEffect(() => {
+    let t = null;
     const handleNewMessage = () => {
-      loadConversations(true);
+      // Debounce inbox refresh on message flood
+      if (t) clearTimeout(t);
+      t = setTimeout(() => loadConversations(true), 800);
     };
     window.addEventListener("new_message", handleNewMessage);
     return () => {
       window.removeEventListener("new_message", handleNewMessage);
+      if (t) clearTimeout(t);
     };
   }, []);
 

@@ -201,7 +201,7 @@ async function apiFetch(path, options = {}) {
   return res;
 }
 
-// Session-cached master options (cuts /genders 429 + auth load)
+// Session-cached master options — public fetch (no auth header / no user throttle)
 async function fetchOptionsCached(path, cacheKey, ttlMs = 60 * 60 * 1000) {
   try {
     const raw = sessionStorage.getItem(cacheKey);
@@ -214,7 +214,21 @@ async function fetchOptionsCached(path, cacheKey, ttlMs = 60 * 60 * 1000) {
   } catch {
     /* ignore */
   }
-  const res = await apiFetch(path);
+  // Plain fetch: catalogs are AllowAny; avoids authenticated burst counters
+  const res = await fetch(`${BASE_URL}${path}`, {
+    headers: { Accept: "application/json", "X-App-Version": APP_VERSION },
+  });
+  if (!res.ok) {
+    // Fallback to authenticated path once if public fails
+    const authRes = await apiFetch(path);
+    const data = await authRes.json();
+    try {
+      sessionStorage.setItem(cacheKey, JSON.stringify({ t: Date.now(), data }));
+    } catch {
+      /* ignore */
+    }
+    return data;
+  }
   const data = await res.json();
   try {
     sessionStorage.setItem(cacheKey, JSON.stringify({ t: Date.now(), data }));

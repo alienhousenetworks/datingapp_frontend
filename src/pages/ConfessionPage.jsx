@@ -331,8 +331,18 @@ export default function ConfessionPage() {
       setTimeout(loadFeed, 800);
     } catch (err) {
       console.error("Error posting confession:", err);
-      const errMsg = err.message || "Failed to post confession";
-      showToast(`❌ ${errMsg}`);
+      const code = err.data?.code || err.data?.default_code;
+      const detail = err.data?.detail || err.message;
+      if (
+        code === "confession_daily_limit" ||
+        /daily limit/i.test(String(detail || ""))
+      ) {
+        showToast("Daily confession limit reached. Try again tomorrow.");
+      } else if (err.status === 429) {
+        showToast("Too many requests — wait a moment and try again.");
+      } else {
+        showToast(`❌ ${detail || "Failed to post confession"}`);
+      }
     } finally {
       setPosting(false);
     }

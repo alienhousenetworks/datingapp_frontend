@@ -182,28 +182,46 @@ export default function ChatWindow({ conversation, onDeleteConversation, onConve
   // ── Load messages when conversation changes ─────────────
   useEffect(() => {
     if (!conversation?.id) return;
+    let cancelled = false;
+    // Generation token: ignore async connect after unmount / conversation switch
+    const gen = (wsRef._connectGen = (wsRef._connectGen || 0) + 1);
+
     setMessages([]);
     loadMessages();
-    connectWebSocket();
     loadDraft();
 
-    // Reconnect WS when tab becomes visible (user switches back)
+    // Small delay avoids React StrictMode / fast switch "closed before established"
+    const t = setTimeout(() => {
+      if (!cancelled && wsRef._connectGen === gen) {
+        connectWebSocket(gen);
+      }
+    }, 50);
+
     const handleVisibilityChange = () => {
       if (document.visibilityState === "visible") {
         const ws = wsRef.current;
         if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
-          connectWebSocket();
-          loadMessages(); // catch any missed messages
+          if (!cancelled) connectWebSocket(wsRef._connectGen);
+          loadMessages();
         }
       }
     };
     document.addEventListener("visibilitychange", handleVisibilityChange);
 
     return () => {
-      // Cleanup WebSocket on conversation switch
+      cancelled = true;
+      clearTimeout(t);
+      wsConnectingRef.current = false;
       if (wsRef.current) {
-        wsRef.current.onclose = null;
-        wsRef.current.close();
+        // Mark intentional close so onclose does not reconnect/spam
+        wsRef.current._intentionalClose = true;
+        try {
+          wsRef.current.onclose = null;
+          wsRef.current.onerror = null;
+          wsRef.current.close();
+        } catch {
+          /* ignore */
+        }
         wsRef.current = null;
       }
       if (reconnectTimeoutRef.current) {
@@ -379,16 +397,22 @@ export default function ChatWindow({ conversation, onDeleteConversation, onConve
 
 
   // ── WebSocket for real-time messages ─────────────────
-  const connectWebSocket = async () => {
-    // Prevent parallel connect calls (e.g. mount + visibilitychange firing simultaneously).
-    // Each call resets reconnectAttemptsRef to 0, making every attempt look like the "first",
-    // so the permanent-auth-failure guard never fires until all parallel calls complete.
+  // NOTE: Do NOT call getConversations() here — that caused /conversations 429 storms
+  // when switching chats. Server rejects unauthorized WS tickets; parent clears invalid convs.
+  const connectWebSocket = async (connectGen) => {
     if (wsConnectingRef.current) return;
+    if (connectGen != null && wsRef._connectGen !== connectGen) return;
     wsConnectingRef.current = true;
 
     if (wsRef.current) {
-      wsRef.current.onclose = null;
-      wsRef.current.close();
+      wsRef.current._intentionalClose = true;
+      try {
+        wsRef.current.onclose = null;
+        wsRef.current.onerror = null;
+        wsRef.current.close();
+      } catch {
+        /* ignore */
+      }
       wsRef.current = null;
     }
     if (reconnectTimeoutRef.current) {
@@ -396,46 +420,22 @@ export default function ChatWindow({ conversation, onDeleteConversation, onConve
       reconnectTimeoutRef.current = null;
     }
     reconnectAttemptsRef.current = 0;
-
-    // Guard: verify the user is still a participant before opening the socket.
-    // This prevents a 403 storm when the conversation was deleted/unmatched but
-    // the UI still holds a stale activeConv reference.
-    try {
-      const convs = await chatAPI.getConversations();
-      const isParticipant = (convs || []).some((c) => c.id === conversation.id);
-      if (!isParticipant) {
-        console.warn(
-          `[ChatWS] Conversation ${conversation.id} not found in user's list — aborting WS connect.`
-        );
-        wsConnectingRef.current = false;
-        // Notify parent so it can clear the stale activeConv and re-select a valid one
-        if (typeof onConversationInvalid === 'function') {
-          onConversationInvalid(conversation.id);
-        }
-        return;
-      }
-    } catch (err) {
-      console.warn("[ChatWS] Could not verify conversation participation:", err);
-      // Proceed optimistically; the server will reject if truly unauthorised.
-    }
-
     wsConnectingRef.current = false;
 
     const connect = async (isReconnect = false) => {
-      // Abort if the conversation reference has changed (e.g. user switched chat)
-      if (!wsRef || wsRef._aborted) return;
+      if (connectGen != null && wsRef._connectGen !== connectGen) return;
 
       try {
         const res = await authAPI.getWsTicket();
         if (!res || !res.ticket) return;
-        const ws = new WebSocket(
-          wsURL.chat(conversation.id, res.ticket),
-        );
+        if (connectGen != null && wsRef._connectGen !== connectGen) return;
+
+        const ws = new WebSocket(wsURL.chat(conversation.id, res.ticket));
+        ws._intentionalClose = false;
+        wsRef.current = ws;
 
         ws.onopen = () => {
-          // Reset backoff on successful connection
           reconnectAttemptsRef.current = 0;
-          // On reconnect, reload messages from REST to catch any that came in while disconnected
           if (isReconnect) {
             loadMessages();
           }
@@ -522,35 +522,31 @@ export default function ChatWindow({ conversation, onDeleteConversation, onConve
         };
 
         ws.onclose = (event) => {
-          // WebSocket close codes for permanent auth failures:
-          //   1006 = abnormal closure (what browsers report for HTTP 403 on WS upgrade)
-          //   4403 = custom code the server can send for explicit unauthorised close
-          // Do NOT retry these — the conversation is gone or the user is not a participant.
-          const isPermanentAuthFailure =
-            event.code === 4403 ||
-            (event.code === 1006 && reconnectAttemptsRef.current === 0);
+          // User switched chat / unmounted — do not reconnect or log
+          if (ws._intentionalClose) return;
+          if (connectGen != null && wsRef._connectGen !== connectGen) return;
 
-          if (isPermanentAuthFailure) {
-            console.warn(
-              `[ChatWS] Permanent auth failure (code ${event.code}) for conversation ${conversation.id}. Stopping retries.`
-            );
+          // 4403 = not participant; 1008 policy; stop retry storms
+          if (event.code === 4403 || event.code === 1008 || event.code === 4401) {
+            if (typeof onConversationInvalid === "function") {
+              onConversationInvalid(conversation.id);
+            }
             return;
           }
 
           // Exponential backoff: 5s, 10s, 20s, 30s max
           const attempts = reconnectAttemptsRef.current;
+          if (attempts >= 8) return;
           const delay = Math.min(5000 * Math.pow(2, attempts), 30000);
           reconnectAttemptsRef.current = attempts + 1;
           reconnectTimeoutRef.current = setTimeout(() => {
-            connect(true); // isReconnect=true so it reloads messages
+            connect(true);
           }, delay);
         };
 
         ws.onerror = () => {
-          ws.close();
+          // Let onclose handle reconnect; avoid double-close noise
         };
-
-        wsRef.current = ws;
       } catch (err) {
         console.error("Chat WS connection failed", err);
       }

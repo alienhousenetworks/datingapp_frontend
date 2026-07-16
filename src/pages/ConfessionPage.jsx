@@ -3,8 +3,11 @@ import React, { useState, useEffect } from "react";
 import { socialAPI, profileAPI, geoAPI, moderationAPI } from "../api";
 import confessionStyles from "../styles/ConfessionPage.module.css";
 
-// Short timeout — never block confession feed on GPS (was 10s freeze).
-const getCoordinates = (timeoutMs = 2500) => {
+/**
+ * Browser GPS — only used when posting if profile has no saved location.
+ * NOT used for loading the confession feed (timeouts are browser/OS, not API).
+ */
+const getCoordinates = (timeoutMs = 8000) => {
   return new Promise((resolve, reject) => {
     if (!navigator.geolocation) {
       reject(new Error("Geolocation not supported"));
@@ -17,9 +20,7 @@ const getCoordinates = (timeoutMs = 2500) => {
           lon: pos.coords.longitude,
         });
       },
-      (err) => {
-        reject(err);
-      },
+      (err) => reject(err),
       { enableHighAccuracy: false, timeout: timeoutMs, maximumAge: 600000 }
     );
   });
@@ -109,7 +110,8 @@ export default function ConfessionPage() {
     let detectedCoords = null;
     let locationName = "";
 
-    // 1. Instant: use profile coords only (no GPS wait)
+    // Use profile location only — never call browser GPS for feed load.
+    // GPS timeout (code 3) is a browser/OS issue, not the backend.
     try {
       const profile = await profileAPI.getMyProfile();
       if (profile && profile.latitude && profile.longitude) {
@@ -126,13 +128,12 @@ export default function ConfessionPage() {
     setCoords(detectedCoords);
     setProfileLocationName(locationName);
 
-    // 2. Load feed immediately (global if no coords)
     try {
       const latParam = detectedCoords ? detectedCoords.lat : "";
       const lonParam = detectedCoords ? detectedCoords.lon : "";
       let data = await socialAPI.getFeed(latParam, lonParam);
       let results = Array.isArray(data) ? data : data.results || [];
-      // Fallback to global if geo hybrid empty/errors
+      // Fallback to global feed if location-scoped list is empty
       if (!results.length && (latParam || lonParam)) {
         data = await socialAPI.getFeed("", "");
         results = Array.isArray(data) ? data : data.results || [];
@@ -149,29 +150,31 @@ export default function ConfessionPage() {
     } finally {
       setLoading(false);
     }
+  };
 
-    // 3. Optional short GPS (background) — refresh feed if we get coords
+  /** Resolve coords for posting only (profile first, then GPS if needed). */
+  const resolveCoordsForPost = async () => {
+    if (coords?.lat != null && coords?.lon != null) {
+      return coords;
+    }
     try {
-      const gps = await getCoordinates(2500);
-      if (gps?.lat && gps?.lon) {
-        setCoords(gps);
-        try {
-          const geo = await geoAPI.reverseGeocode(gps.lat, gps.lon);
-          if (geo && geo.display_name) {
-            setProfileLocationName(
-              geo.city || geo.display_name.split(",")[0] || geo.display_name
-            );
-          }
-        } catch {}
-        try {
-          const data = await socialAPI.getFeed(gps.lat, gps.lon);
-          const results = Array.isArray(data) ? data : data.results || [];
-          if (results.length) setConfessions(results);
-        } catch {}
+      const profile = await profileAPI.getMyProfile();
+      if (profile?.latitude && profile?.longitude) {
+        const c = {
+          lat: parseFloat(profile.latitude),
+          lon: parseFloat(profile.longitude),
+        };
+        setCoords(c);
+        if (profile.city) setProfileLocationName(profile.city);
+        return c;
       }
-    } catch (err) {
-      // Geolocation timeout is expected — feed already loaded
-      console.warn("Browser geolocation skipped:", err?.message || err);
+    } catch {}
+    try {
+      const gps = await getCoordinates(8000);
+      setCoords(gps);
+      return gps;
+    } catch {
+      return null;
     }
   };
 
@@ -306,18 +309,21 @@ export default function ConfessionPage() {
       showToast("Write at least 30 characters");
       return;
     }
-    if (!coords) {
-      showToast("❌ Location required. Please enable location or set your profile city.");
-      return;
-    }
     setPosting(true);
     try {
+      const postCoords = await resolveCoordsForPost();
+      if (!postCoords?.lat || !postCoords?.lon) {
+        showToast(
+          "Location required to post. Enable GPS or save location on your profile."
+        );
+        return;
+      }
       await socialAPI.post({
         text: text.trim(),
         mood_tag: moodTag,
         language: "en",
-        latitude: parseFloat(coords.lat.toFixed(6)),
-        longitude: parseFloat(coords.lon.toFixed(6)),
+        latitude: parseFloat(Number(postCoords.lat).toFixed(6)),
+        longitude: parseFloat(Number(postCoords.lon).toFixed(6)),
       });
       showToast("✅ Confession posted!");
       setText("");

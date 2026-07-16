@@ -27,13 +27,15 @@ const log = {
 };
 
 // Connection strategy:
-//   "hybrid"    — STUN + TURN in initial PC config, iceTransportPolicy "all" (P2P preferred).
-//                 ICE tries host/srflx/IPv6 first; relay only when hole-punch fails (~80–95% connect).
+//   "hybrid"    — P2P-first: STUN-only PC initially (host/srflx/IPv6), then delayed TURN inject
+//                 after delayed_turn_ms if not connected. Maximizes P2P ratio across networks.
 //   "p2p_only"  — STUN only (testing / same-network). Fails on symmetric NAT / double CGNAT (Jio↔Airtel).
 const CONNECTION_MODE = "hybrid";
 const P2P_ONLY_MODE = CONNECTION_MODE === "p2p_only";
-const ICE_CANDIDATE_POOL_SIZE = 30;
+// Keep pool small so host/srflx gather before relay allocation.
+const ICE_CANDIDATE_POOL_SIZE = 8;
 const CANDIDATE_CACHE_TTL_MS = 45000;
+const DEFAULT_DELAYED_TURN_MS = 3500;
 
 // Phase 1 — Initial ICE stabilization (adaptive timeout from backend prediction)
 const DISCONNECT_GRACE_MS = 12000;
@@ -785,31 +787,32 @@ export default function CallManager({ user, debug }) {
       log.turn("TURN disabled — P2P_ONLY_MODE is active.");
       return;
     }
-    // Hybrid mode loads TURN at PC creation — mid-call setConfiguration disrupts ICE pairing.
-    if (CONNECTION_MODE === "hybrid") {
-      log.turn("TURN already in initial ICE config (hybrid mode) — skipping setConfiguration.");
-      turnEscalatedRef.current = true;
-      return;
-    }
-    auditAction("setConfiguration(TURN)", "turn_escalation");
-    if (!canInterruptInitialIce()) {
-      log.turn("TURN escalation deferred — initial ICE phase still running.");
-      return;
-    }
     const pc = pcRef.current;
     if (!pc || turnEscalatedRef.current) return;
+    if (iceConnectedTimeRef.current > 0) {
+      log.turn("Already connected P2P — skipping TURN escalate.");
+      return;
+    }
 
+    auditAction("setConfiguration(TURN)", "turn_escalation");
     turnEscalatedRef.current = true;
     turnFallbackOccurredRef.current = true;
-    log.turn("Escalating ICE config to include TURN servers.");
+    log.turn("Escalating ICE config to include TURN servers (P2P window elapsed).");
 
     try {
       const res = await callAPI.getIceServers(false, false);
-      const turnServers = mapIceServersFromApi(res?.iceServers);
-      const fullConfig = buildRtcConfiguration([...DEFAULT_STUN_SERVERS, ...turnServers]);
+      const fullServers = mapIceServersFromApi(res?.iceServers?.length ? res.iceServers : DEFAULT_STUN_SERVERS);
+      const fullConfig = buildRtcConfiguration(fullServers);
       timelineBump("setConfigurationCalls", { reason: "turn_escalation" });
       pc.setConfiguration(fullConfig);
-      log.turn("TURN servers applied via setConfiguration.");
+      // Restart ICE so relay candidates are gathered and paired.
+      try {
+        if (typeof pc.restartIce === "function") pc.restartIce();
+      } catch { /* older browsers */ }
+      if (isInitiatorRef.current) {
+        await sendIceRestartOffer("ice_restart_recovery");
+      }
+      log.turn("TURN servers applied via setConfiguration + ICE restart.");
     } catch (err) {
       log.error("TURN escalation failed:", err);
     }
@@ -2803,22 +2806,36 @@ export default function CallManager({ user, debug }) {
       }
 
       let iceServers = [...DEFAULT_STUN_SERVERS];
+      let delayedTurnMs = DEFAULT_DELAYED_TURN_MS;
+      let p2pFirst = CONNECTION_MODE === "hybrid";
       try {
-        const res = await callAPI.getIceServers(false, P2P_ONLY_MODE);
+        // Hybrid starts STUN-only (stun_only=true) so host/srflx win; TURN arrives later.
+        const stunOnlyInitial = CONNECTION_MODE === "hybrid" || P2P_ONLY_MODE;
+        const res = await callAPI.getIceServers(false, stunOnlyInitial);
         if (res?.iceServers?.length) {
           const mapped = mapIceServersFromApi(res.iceServers);
-          iceServers = P2P_ONLY_MODE
-            ? [...DEFAULT_STUN_SERVERS, ...filterStunOnlyIceServers(mapped)]
+          iceServers = stunOnlyInitial
+            ? dedupeIceServers([...DEFAULT_STUN_SERVERS, ...filterStunOnlyIceServers(mapped)])
             : mapped;
         }
         if (res?.iceCandidatePoolSize) {
-          iceCandidatePoolSizeRef.current = res.iceCandidatePoolSize;
+          iceCandidatePoolSizeRef.current = Math.min(Number(res.iceCandidatePoolSize) || ICE_CANDIDATE_POOL_SIZE, 12);
+        } else {
+          iceCandidatePoolSizeRef.current = ICE_CANDIDATE_POOL_SIZE;
+        }
+        if (typeof res?.delayed_turn_ms === "number") {
+          delayedTurnMs = res.delayed_turn_ms;
+        }
+        if (typeof res?.p2p_first === "boolean") {
+          p2pFirst = res.p2p_first;
         }
         if (res?.ipv6_available) {
           localIpv6AvailableRef.current = true;
         }
         logWebRTC("ICE_SERVERS_LOADED", {
           serverCount: iceServers.length,
+          p2pFirst,
+          delayedTurnMs,
           ipv6_available: Boolean(res?.ipv6_available),
           prefer_ipv6: preferIpv6Ref.current || Boolean(res?.prefer_ipv6),
         });
@@ -2828,19 +2845,42 @@ export default function CallManager({ user, debug }) {
 
       if (isStale()) return;
 
+      // If backend says P2P is hopeless, load full STUN+TURN immediately.
+      if (CONNECTION_MODE === "hybrid" && !p2pFirst && delayedTurnMs === 0) {
+        try {
+          const fullRes = await callAPI.getIceServers(false, false);
+          if (fullRes?.iceServers?.length) {
+            iceServers = mapIceServersFromApi(fullRes.iceServers);
+            turnEscalatedRef.current = true;
+          }
+        } catch { /* keep STUN */ }
+      }
+
       const configuration = buildRtcConfiguration(iceServers);
       const turnCount = configuration.iceServers.filter((s) => {
         const urls = Array.isArray(s.urls) ? s.urls : [s.urls];
         return urls.some((u) => typeof u === "string" && (u.startsWith("turn:") || u.startsWith("turns:")));
       }).length;
-      if (CONNECTION_MODE === "hybrid" && turnCount > 0) {
-        turnEscalatedRef.current = true;
-      }
       log.ice(
         CONNECTION_MODE === "hybrid"
-          ? `Hybrid RTCPeerConnection (STUN+TURN upfront, P2P preferred, pool=${ICE_CANDIDATE_POOL_SIZE}, turnEntries=${turnCount})`
-          : `P2P-only RTCPeerConnection (STUN, pool=${ICE_CANDIDATE_POOL_SIZE}, no TURN)`
+          ? `Hybrid RTCPeerConnection (P2P-first STUN, delayed TURN ${delayedTurnMs}ms, pool=${iceCandidatePoolSizeRef.current}, turnEntries=${turnCount})`
+          : `P2P-only RTCPeerConnection (STUN, pool=${iceCandidatePoolSizeRef.current}, no TURN)`
       );
+
+      // Schedule delayed TURN for hybrid P2P-first mode.
+      if (CONNECTION_MODE === "hybrid" && !turnEscalatedRef.current && delayedTurnMs > 0) {
+        if (initialIceTimeoutRef.current) {
+          /* reuse timer slot for delayed turn */
+        }
+        const turnTimer = setTimeout(() => {
+          if (iceConnectedTimeRef.current > 0) return;
+          escalateToTurn();
+        }, delayedTurnMs);
+        // Stash on ref-like property so cleanup can cancel if needed
+        if (typeof window !== "undefined") {
+          window.__spyceDelayedTurnTimer = turnTimer;
+        }
+      }
       installTimelineGlobals();
 
       const pc = new RTCPeerConnection(configuration);

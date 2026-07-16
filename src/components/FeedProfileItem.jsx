@@ -635,12 +635,18 @@ export default function FeedProfileItem({ profile, onLike, isPreview = false }) 
   if (!profile) return null;
 
   const themeStyles = resolveThemeStyles(profile.theme);
-  const layoutCode = themeStyles.layoutId?.toLowerCase() || "";
-  let layoutType = "polaroid";
-  if (layoutCode.includes("elegant") || layoutCode === "l02") layoutType = "elegant";
-  if (layoutCode.includes("minimal")) layoutType = "minimal";
-  if (layoutCode.includes("grid")) layoutType = "grid";
-  if (layoutCode.includes("immersive")) layoutType = "immersive";
+  // Map Flutter premium layout IDs (L01–L05) to web card shells
+  const layoutCode = (themeStyles.layoutId || "").toLowerCase();
+  let layoutType = "polaroid"; // L01 Velvet Glass
+  if (layoutCode === "l02" || layoutCode.includes("maison") || layoutCode.includes("elegant")) {
+    layoutType = "elegant";
+  } else if (layoutCode === "l04" || layoutCode.includes("atelier") || layoutCode.includes("minimal")) {
+    layoutType = "minimal";
+  } else if (layoutCode === "l05" || layoutCode.includes("runway") || layoutCode.includes("grid")) {
+    layoutType = "grid";
+  } else if (layoutCode === "l03" || layoutCode.includes("noir") || layoutCode.includes("immersive")) {
+    layoutType = "immersive";
+  }
 
   const handleLike = () => {
     if (isPreview) {

@@ -1,3 +1,12 @@
+# SPYCE Web (testing only)
+
+Internal test client for the **SPYCE** dating platform.
+**Production app is Flutter (iOS / Android).** This React web app is not the consumer product.
+
+Payments here may use a Razorpay placeholder for testing. Real billing is **Google Play Billing** and **Apple App Store**.
+
+---
+
 # Getting Started with Create React App
 
 This project was bootstrapped with [Create React App](https://github.com/facebook/create-react-app).

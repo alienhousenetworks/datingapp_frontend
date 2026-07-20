@@ -129,7 +129,7 @@ export default function OnboardingPage({ onComplete }) {
     }
     
     if (age < 18) {
-      setError("You must be at least 18 years old to use spyce.");
+      setError("You must be at least 18 years old to use SPYCE.");
       setSubmitting(false);
       return;
     }
@@ -414,7 +414,7 @@ export default function OnboardingPage({ onComplete }) {
 
           {step === 6 && (
             <div>
-              <h2 style={styles.title}>Welcome to Spyce ✨</h2>
+              <h2 style={styles.title}>Welcome to SPYCE ✨</h2>
               <p style={styles.subtitle}>
                 You have {subscription.trialDaysRemaining} days of free trial remaining. After that, you'll need to subscribe to keep using the app.
               </p>

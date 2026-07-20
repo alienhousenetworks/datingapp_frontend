@@ -33,14 +33,16 @@ export default function useSubscription(enabled = true) {
       const key = `sub_${Date.now()}_${Math.random().toString(36).slice(2)}`;
       const res = await subscriptionAPI.purchase(key);
       
+      // Web is for testing only. Production SPYCE billing is Google Play + App Store.
+      // Razorpay below is a placeholder for web/test purchase flows — not production.
       if (res.status === 'pending' && res.razorpay_order_id) {
-        // Open Razorpay Widget
+        // Placeholder Razorpay widget (test/web only)
         const options = {
           key: res.razorpay_key_id,
           amount: res.amount,
           currency: res.currency,
-          name: "Spyce Premium",
-          description: "Subscription Purchase",
+          name: "SPYCE Premium",
+          description: "Subscription Purchase (test)",
           order_id: res.razorpay_order_id,
           handler: function (response) {
             // Payment success. Wait a bit for webhook, then refresh

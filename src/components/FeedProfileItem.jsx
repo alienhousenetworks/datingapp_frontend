@@ -154,7 +154,8 @@ const MobileFeedCard = ({ profile, handleLike, setFullScreenImage, themeStyles, 
           </div>
         </div>
 
-        <div className={feedCss.mobileInfoCenter}>
+        {/* Identity + bio: sits higher; bio is clamped so like CTA always has room */}
+        <div className={`${feedCss.mobileInfoCenter} ${profile.bio ? feedCss.mobileInfoWithBio : ""}`}>
           <h2 className={feedCss.mobileFunkyName}>
             {(profile.username ? `@${profile.username}` : "Unknown").toUpperCase()}, {profile.age} {profile.gender === 'female' ? 'F' : profile.gender === 'male' ? 'M' : ''}
           </h2>
@@ -164,12 +165,13 @@ const MobileFeedCard = ({ profile, handleLike, setFullScreenImage, themeStyles, 
             <span>75%</span>
           </div>
           {profile.bio && (
-            <p className={feedCss.mobileHandwrittenBio}>
+            <p className={feedCss.mobileHandwrittenBio} title={profile.bio}>
               {profile.bio}
             </p>
           )}
         </div>
 
+        {/* Pinned action: reserved space so long bios never cover the like button */}
         <div className={feedCss.mobileActionCenter}>
           <button 
             type="button" 

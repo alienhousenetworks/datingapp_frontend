@@ -51,11 +51,21 @@ export default function MatchesPage({ onOpenChat }) {
         interactionAPI.getReceivedLikes().catch(() => ({ count: 0, users: [] })),
       ]);
 
-      // Conversations with at least one message
-      const activeConversations = (convData || []).filter((c) => c.last_message !== null);
-      const activeConvUserIds = new Set(activeConversations.map((c) => c.other_user?.id));
+      // Conversations with at least one message; skip deleted/unavailable partners
+      const activeConversations = (convData || []).filter(
+        (c) =>
+          c.last_message !== null &&
+          c.other_user_available !== false &&
+          c.other_user?.id,
+      );
+      const activeConvUserIds = new Set(
+        activeConversations.map((c) => c.other_user?.id).filter(Boolean),
+      );
 
-      const allMatches = matchData || [];
+      // Active matches only; never show deleted/unavailable partners
+      const allMatches = (matchData || []).filter(
+        (m) => m.other_user_available !== false && m.other_user?.id,
+      );
       setNewMatches(
         allMatches.filter((m) => !activeConvUserIds.has(m.other_user?.id)),
       );

@@ -31,7 +31,11 @@ export default function ChatPage({ initialMatch }) {
     loadInFlight.current = true;
     try {
       const data = await chatAPI.getConversations();
-      const convs = Array.isArray(data) ? data : data?.results || [];
+      const raw = Array.isArray(data) ? data : data?.results || [];
+      // Never show chats with deleted/banned partners
+      const convs = raw.filter(
+        (c) => c.other_user_available !== false && c.other_user?.id,
+      );
       setConversations(convs);
 
       if (!keepActive) {
@@ -80,14 +84,54 @@ export default function ChatPage({ initialMatch }) {
       if (t) clearTimeout(t);
       t = setTimeout(() => loadConversations(true), 800);
     };
+    const handlePartnerRemoved = (e) => {
+      const detail = e?.detail || {};
+      const payload = detail.data || detail;
+      const deletedId =
+        payload.deleted_user_id || payload.left_user_id || payload.other_user_id;
+      const cid = payload.conversation_id;
+      // Account deleted / both left — drop chat immediately
+      if (
+        detail.type === "partner_account_deleted" ||
+        detail.type === "conversation_deleted" ||
+        detail.type === "match_removed"
+      ) {
+        setConversations((prev) => {
+          const remaining = prev.filter((c) => {
+            if (cid && c.id === cid) return false;
+            if (deletedId && c.other_user?.id === deletedId) return false;
+            return true;
+          });
+          setActiveConv((active) => {
+            if (!active) return remaining[0] || null;
+            if (cid && active.id === cid) return remaining[0] || null;
+            if (deletedId && active.other_user?.id === deletedId) {
+              return remaining[0] || null;
+            }
+            return active;
+          });
+          return remaining;
+        });
+      }
+      loadConversations(true);
+    };
     window.addEventListener("new_message", handleNewMessage);
+    window.addEventListener("partner_removed", handlePartnerRemoved);
     return () => {
       window.removeEventListener("new_message", handleNewMessage);
+      window.removeEventListener("partner_removed", handlePartnerRemoved);
       if (t) clearTimeout(t);
     };
   }, []);
 
   const handleDeleteConversation = async () => {
+    // Leave chat: remove optimistically then reload
+    setActiveConv((active) => {
+      if (active) {
+        setConversations((prev) => prev.filter((c) => c.id !== active.id));
+      }
+      return null;
+    });
     await loadConversations(false);
   };
 

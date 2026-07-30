@@ -1,3 +1,10 @@
+/**
+ * DISABLED / NOT SHIPPED — SPYCE Blind Date
+ * -----------------------------------------------------------------------------
+ * Retained for reference / test harness only. Do NOT re-enable in product nav
+ * (Play Store / App Store moderation). SPYCE is Intent-First Dating, not AI dating.
+ * Keep this file; do not delete.
+ */
 import React, { useState, useEffect, useRef } from "react";
 import { wsURL, authAPI } from "../api";
 import stylesModule from "../styles/BlindDatePage.module.css";

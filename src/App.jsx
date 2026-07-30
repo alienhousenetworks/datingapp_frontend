@@ -11,6 +11,7 @@ import ChatPage from "./pages/ChatPage";
 import ProfilePage from "./pages/ProfilePage";
 import ConfessionPage from "./pages/ConfessionPage";
 import SettingsPage from "./pages/SettingsPage";
+// DISABLED / NOT SHIPPED: Blind Date page kept for reference only (store moderation).
 import BlindDatePage from "./pages/BlindDatePage";
 
 // Components
@@ -62,6 +63,21 @@ export default function App() {
             }
             if (data.type === "new_message") {
               window.dispatchEvent(new CustomEvent("new_message", { detail: data.data }));
+            }
+            // Leave/unmatch/deleted partner — refresh matches + inbox immediately
+            if (
+              data.type === "partner_left" ||
+              data.type === "conversation_deleted" ||
+              data.type === "match_removed" ||
+              data.type === "partner_account_deleted"
+            ) {
+              window.dispatchEvent(new Event("new_match"));
+              window.dispatchEvent(
+                new CustomEvent("new_message", { detail: data.data || data }),
+              );
+              window.dispatchEvent(
+                new CustomEvent("partner_removed", { detail: data }),
+              );
             }
           } catch (err) {
             console.error("Error parsing notification message:", err);
@@ -158,6 +174,7 @@ export default function App() {
       <main className="mobileTopNavPadding" style={styles.main}>
         <ErrorBoundary>
           {tab === "discover" && <DiscoverPage user={auth.user} setTab={setTab} />}
+          {/* Blind Date NOT SHIPPED — unreachable via nav; code retained intentionally */}
           {tab === "blind_date" && <BlindDatePage user={auth.user} />}
           {tab === "matches" && <MatchesPage onOpenChat={openChat} />}
           {tab === "chat" && <ChatPage initialMatch={chatMatch} />}

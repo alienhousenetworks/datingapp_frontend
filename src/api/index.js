@@ -566,7 +566,7 @@ export const chatAPI = {
     return res.json();
   },
 
-  // Upload chat media
+  // Upload chat media — throws with full server body on failure
   uploadMedia: async (conversationId, file, type = "image") => {
     const form = new FormData();
     form.append("media", file);
@@ -580,7 +580,25 @@ export const chatAPI = {
         body: form,
       },
     );
-    return res.json();
+    let data = null;
+    try {
+      data = await res.json();
+    } catch {
+      data = { error: `Non-JSON response (HTTP ${res.status})` };
+    }
+    if (!res.ok) {
+      const msg =
+        data?.detail ||
+        data?.error ||
+        data?.message ||
+        (typeof data === "object" ? JSON.stringify(data) : String(data)) ||
+        `Upload failed (HTTP ${res.status})`;
+      const err = new Error(`${msg} [HTTP ${res.status}]`);
+      err.status = res.status;
+      err.data = data;
+      throw err;
+    }
+    return data;
   },
 
   // Local-first drafts (always works; server sync is best-effort)
@@ -748,8 +766,11 @@ export const socialAPI = {
     });
     return r.json();
   },
-  report: async (id) => {
-    const r = await apiFetch(`/social/${id}/report/`, { method: "POST" });
+  report: async (id, reason = "SPAM", description = "") => {
+    const r = await apiFetch(`/social/${id}/report/`, {
+      method: "POST",
+      body: JSON.stringify({ reason, description }),
+    });
     return r.json();
   },
 
@@ -806,6 +827,14 @@ export const verificationAPI = {
     const res = await apiFetch("/verification/faceio-complete/", {
       method: "POST",
       body: JSON.stringify({ facial_id: facialId }),
+    });
+    return res.json();
+  },
+
+  /** Dev/staging mock liveness bypass (no skip on onboarding — must complete). */
+  mockComplete: async () => {
+    const res = await apiFetch("/verification/mock-complete/", {
+      method: "POST",
     });
     return res.json();
   },
@@ -938,6 +967,7 @@ export const wsURL = {
   chat: (conversationId, ticket) =>
     `${WS_BASE}/chat/${conversationId}/?ticket=${ticket}`,
   call: (ticket) => `${WS_BASE}/call/?ticket=${ticket}`,
+  // DISABLED / NOT SHIPPED — Blind Date WS (store moderation). Do not use in product UI.
   blindDate: (ticket) => `${WS_BASE}/blind-date/?ticket=${ticket}`,
   notifications: (ticket) => `${WS_BASE}/notifications/?ticket=${ticket}`,
 };

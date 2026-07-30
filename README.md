@@ -1,7 +1,9 @@
 # SPYCE Web (testing only)
 
-Internal test client for the **SPYCE** dating platform.
+Internal test client for **SPYCE** — **Intent-First Dating** (not an AI dating app).
 **Production app is Flutter (iOS / Android).** This React web app is not the consumer product.
+
+Discovery is scroll-based (not swipe-deck). **Blind Date is NOT SHIPPED** (store moderation); code may remain for reference.
 
 Payments here may use a Razorpay placeholder for testing. Real billing is **Google Play Billing** and **Apple App Store**.
 

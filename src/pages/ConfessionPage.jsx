@@ -270,19 +270,20 @@ export default function ConfessionPage() {
       showToast("Please provide details for the report");
       return;
     }
+    if (!reportModalId) return;
     setSubmittingReport(true);
     try {
-      await moderationAPI.submitReport({
-        targetId: reportModalId,
-        reason: reportReason,
-        description: reportDescription.trim(),
-        targetType: "CONFESSION"
-      });
+      // Dedicated confession report endpoint resolves author server-side
+      await socialAPI.report(
+        reportModalId,
+        reportReason,
+        reportDescription.trim()
+      );
       showToast("Report submitted successfully");
       setReportModalId(null);
       setReportDescription("");
     } catch (err) {
-      showToast("Failed to submit report");
+      showToast(err?.message || "Failed to submit report");
     } finally {
       setSubmittingReport(false);
     }
@@ -684,7 +685,7 @@ export default function ConfessionPage() {
             >
               <option value="SPAM">Spam</option>
               <option value="HARASSMENT">Harassment</option>
-              <option value="INAPPROPRIATE">Inappropriate Content</option>
+              <option value="FAKE_PROFILE">Fake / misleading</option>
               <option value="OTHER">Other (specify below)</option>
             </select>
             <label style={{...s.moodLabel, display: 'block', marginBottom: 6}}>Description</label>

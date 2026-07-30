@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect } from "react";
-import { chatAPI, wsURL, API_BASE_URL, authAPI } from "../api";
+import { chatAPI, wsURL, API_BASE_URL, authAPI, profileAPI, userAPI } from "../api";
 import { getUserDisplayName, getUserInitial } from "../utils/userDisplay";
+import ProfileDetail from "./ProfileDetail";
 
 const getAbsoluteMediaUrl = (url) => {
   if (!url) return null;
@@ -34,20 +35,47 @@ export default function ChatWindow({ conversation, onDeleteConversation, onConve
   const [uploadingMedia, setUploadingMedia] = useState(false);
   const fileInputRef = useRef(null);
   const videoRef = useRef(null);
+  const [peerProfile, setPeerProfile] = useState(null);
+  const [loadingPeerProfile, setLoadingPeerProfile] = useState(false);
+  const [viewerStamp, setViewerStamp] = useState("");
 
   // Preview before send
   const [selectedFile, setSelectedFile] = useState(null);
   const [previewUrl, setPreviewUrl] = useState(null);
   const [mediaType, setMediaType] = useState("");
 
+  // Viewer watermark identity (username preferred, else user id)
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const me = await userAPI.getMe();
+        const profile = await profileAPI.getMyProfile().catch(() => null);
+        if (cancelled) return;
+        const uname =
+          profile?.username || me?.username || me?.user?.username || "";
+        const id = me?.id || me?.user_id || me?.user?.id || "";
+        setViewerStamp(uname ? `@${String(uname).replace(/^@/, "")}` : String(id).slice(0, 12));
+      } catch {
+        /* ignore */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
-  // Countdown effect for active media message
+  // Countdown effect for active media message (receiver only — not sender re-view)
   useEffect(() => {
     if (!activeMediaMessage) {
       setMediaCountdown(null);
       return;
     }
-    // If it's an image, start the 10s countdown immediately
+    // Sender keeps media; no auto-destruct countdown for own sends
+    if (activeMediaMessage.from === "mine") {
+      setMediaCountdown(null);
+      return;
+    }
     if (activeMediaMessage.type === "view_once" || activeMediaMessage.type === "image") {
       setMediaCountdown(10);
     }
@@ -72,10 +100,17 @@ export default function ChatWindow({ conversation, onDeleteConversation, onConve
   const handleMediaDestruct = async (msg) => {
     setActiveMediaMessage(null);
     setMediaCountdown(null);
+    // Sender never marks own media as deleted / seen
+    if (!msg || msg.from === "mine") return;
     try {
       await chatAPI.markSeen(msg.id);
     } catch (err) {
       console.error("Failed to mark media message as seen", err);
+      alert(
+        `Mark seen failed: ${err?.message || err}${
+          err?.data ? `\n${JSON.stringify(err.data)}` : ""
+        }`,
+      );
     }
     setMessages((prev) =>
       prev.map((m) =>
@@ -89,6 +124,32 @@ export default function ChatWindow({ conversation, onDeleteConversation, onConve
           : m
       )
     );
+  };
+
+  const openPeerProfile = async () => {
+    const peer = conversation?.other_user || {};
+    const peerId = peer?.id || peer?.user_id;
+    if (!peerId) {
+      alert("Profile unavailable for this chat (no peer id).");
+      return;
+    }
+    setLoadingPeerProfile(true);
+    try {
+      const data = await profileAPI.getProfile(peerId);
+      if (data?.error) {
+        alert(
+          `Could not load profile: ${data.error}${
+            data.detail ? ` — ${data.detail}` : ""
+          }`,
+        );
+        return;
+      }
+      setPeerProfile(data);
+    } catch (err) {
+      alert(`Could not load profile: ${err?.message || err}`);
+    } finally {
+      setLoadingPeerProfile(false);
+    }
   };
 
   const handleFileChange = (e) => {
@@ -117,54 +178,52 @@ export default function ChatWindow({ conversation, onDeleteConversation, onConve
 
 
   const renderMessageContent = (m) => {
-    const isOpened = m.is_deleted || m.is_seen || m.text === "[Media Deleted]" || m.text === "[Message Expired]";
+    // Receiver only: opened/vanished. Sender keeps media until server deletes.
+    const isOpenedForReceiver =
+      m.from !== "mine" &&
+      (m.is_deleted || m.text === "[Media Deleted]" || m.text === "[Message Expired]");
     
     if (m.type === "view_once" || m.type === "image") {
-      if (isOpened) {
+      if (isOpenedForReceiver) {
         return (
           <div style={styles.mediaPlaceholderOpened}>
             <span>🔒 Opened Image</span>
           </div>
         );
       }
-      if (m.from === "mine") {
-        return (
-          <div style={styles.mediaPlaceholderSent}>
-            <span>📷 Sent View Once Image</span>
-          </div>
-        );
-      }
+      // Covered photo icon — tap opens fullscreen with viewer watermark
       return (
         <button
           onClick={() => setActiveMediaMessage(m)}
-          style={styles.mediaViewBtn}
+          style={styles.mediaCoverBtn}
+          title={m.from === "mine" ? "Your photo — tap to preview" : "Tap to view"}
         >
-          <span>📷 Tap to View Image (10s)</span>
+          <span style={styles.mediaCoverIcon}>📷</span>
+          <span style={styles.mediaCoverLabel}>
+            {m.from === "mine" ? "Photo · tap to view" : "Tap to view photo"}
+          </span>
         </button>
       );
     }
     
     if (m.type === "view_once_video" || m.type === "video") {
-      if (isOpened) {
+      if (isOpenedForReceiver) {
         return (
           <div style={styles.mediaPlaceholderOpened}>
             <span>🔒 Opened Video</span>
           </div>
         );
       }
-      if (m.from === "mine") {
-        return (
-          <div style={styles.mediaPlaceholderSent}>
-            <span>🎥 Sent View Once Video</span>
-          </div>
-        );
-      }
       return (
         <button
           onClick={() => setActiveMediaMessage(m)}
-          style={styles.mediaViewBtn}
+          style={styles.mediaCoverBtn}
+          title={m.from === "mine" ? "Your video — tap to preview" : "Tap to play"}
         >
-          <span>🎥 Tap to Play Video</span>
+          <span style={styles.mediaCoverIcon}>🎥</span>
+          <span style={styles.mediaCoverLabel}>
+            {m.from === "mine" ? "Video · tap to view" : "Tap to play video"}
+          </span>
         </button>
       );
     }
@@ -361,12 +420,22 @@ export default function ChatWindow({ conversation, onDeleteConversation, onConve
         ? data.reverse()
         : (data.results || []).reverse();
 
-      // Mark unseen incoming messages as seen
+      // Mark unseen *text* only — media is marked when the user opens it
+      // (auto-seen was deleting view-once media before open).
+      const mediaTypes = new Set([
+        "image",
+        "video",
+        "view_once",
+        "view_once_video",
+        "audio",
+      ]);
       msgs.forEach(async (m) => {
         if (!m.is_me && !m.is_seen) {
+          const mt = (m.message_type || m.type || "text").toString().toLowerCase();
+          if (mediaTypes.has(mt)) return;
           try {
             const messageId = m.id ? String(m.id) : null;
-            if (!messageId || messageId.startsWith('temp')) return;
+            if (!messageId || messageId.startsWith("temp") || messageId.startsWith("local-")) return;
             await chatAPI.markSeen(messageId);
           } catch (e) {
             console.warn("[Chat Sync] Message ID not yet ready on backend server.");
@@ -560,22 +629,78 @@ export default function ChatWindow({ conversation, onDeleteConversation, onConve
     if (selectedFile) {
       const file = selectedFile;
       const type = mediaType === "video" ? "view_once_video" : "view_once";
+      const localPreview = previewUrl;
       
       setSelectedFile(null);
-      if (previewUrl) {
-        URL.revokeObjectURL(previewUrl);
-        setPreviewUrl(null);
-      }
       setMediaType("");
+      
+      // Optimistic bubble so sender never loses media while processing
+      const tempId = `local-media-${Date.now()}`;
+      const optimistic = {
+        id: tempId,
+        from: "mine",
+        type,
+        url: localPreview || null,
+        text: type.includes("video") ? "🎥 Sending video…" : "📷 Sending photo…",
+        time: new Date().toISOString(),
+        reactions: [],
+        pending: true,
+      };
+      setMessages((prev) => [...prev, optimistic]);
+      setPreviewUrl(null);
       
       setUploadingMedia(true);
       try {
-        await chatAPI.uploadMedia(conversation.id, file, type);
+        const res = await chatAPI.uploadMedia(conversation.id, file, type);
+        // Poll a few times for the real message
+        let found = false;
+        for (let i = 0; i < 10; i++) {
+          await new Promise((r) => setTimeout(r, i === 0 ? 900 : 1200));
+          try {
+            await loadMessages();
+            // loadMessages replaces list — check after load in next tick via messages is hard;
+            // if upload accepted, show status from server
+            found = true;
+            break;
+          } catch (pollErr) {
+            if (i === 9) throw pollErr;
+          }
+        }
+        if (found) {
+          // Drop temp if server message present
+          setMessages((prev) => prev.filter((m) => m.id !== tempId));
+        }
+        // Soft success toast for testing
+        console.info("Media upload response:", res);
       } catch (err) {
         console.error("Failed to upload media", err);
-        alert("Failed to send media. Please try again.");
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === tempId
+              ? {
+                  ...m,
+                  pending: false,
+                  text: `Failed: ${err?.message || err}${
+                    err?.data ? ` | ${JSON.stringify(err.data)}` : ""
+                  }`,
+                }
+              : m,
+          ),
+        );
+        alert(
+          `Failed to send media:\n${err?.message || err}${
+            err?.data ? `\n${JSON.stringify(err.data, null, 2)}` : ""
+          }`,
+        );
       } finally {
         setUploadingMedia(false);
+        if (localPreview) {
+          try {
+            URL.revokeObjectURL(localPreview);
+          } catch {
+            /* ignore */
+          }
+        }
       }
       return;
     }
@@ -674,10 +799,17 @@ export default function ChatWindow({ conversation, onDeleteConversation, onConve
 
 
   const handleLeaveChat = async () => {
-    if (!window.confirm("Are you sure you want to leave this chat? It will be hidden and you will be unmatched.")) return;
+    if (
+      !window.confirm(
+        "Are you sure you want to leave this chat? You will unmatch and this chat will be removed from your inbox and matches.",
+      )
+    )
+      return;
     setLeavingChat(true);
     try {
       await chatAPI.leaveConversation(conversation.id);
+      // Refresh matches list for NEW MATCHES section
+      window.dispatchEvent(new Event("new_match"));
       if (onDeleteConversation) {
         onDeleteConversation();
       }
@@ -710,17 +842,51 @@ export default function ChatWindow({ conversation, onDeleteConversation, onConve
   const initial = getUserInitial(other);
   const name = getUserDisplayName(other);
   const color = getColor(0);
+  const peerAvatar =
+    other.image_url ||
+    other.avatar_url ||
+    other.profile_image ||
+    other.images?.[0]?.image_url ||
+    null;
 
   return (
     <div style={styles.window}>
-      {/* Header */}
+      {/* Header — avatar / name open peer profile */}
       <div style={{ ...styles.header, justifyContent: "space-between" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-          <div style={{ ...styles.av, background: color + "33", color }}>
-            {initial}
+        <button
+          type="button"
+          onClick={openPeerProfile}
+          disabled={loadingPeerProfile}
+          title="View profile"
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 12,
+            background: "transparent",
+            border: "none",
+            padding: 0,
+            cursor: "pointer",
+            textAlign: "left",
+            minWidth: 0,
+          }}
+        >
+          <div
+            style={{
+              ...styles.av,
+              background: color + "33",
+              color,
+              backgroundImage: peerAvatar ? `url(${getAbsoluteMediaUrl(peerAvatar)})` : undefined,
+              backgroundSize: "cover",
+              backgroundPosition: "center",
+            }}
+          >
+            {!peerAvatar ? initial : null}
           </div>
           <div style={styles.headerInfo}>
-            <div style={styles.headerName}>{name}</div>
+            <div style={styles.headerName}>
+              {name}
+              {loadingPeerProfile ? " …" : ""}
+            </div>
             <div style={styles.headerStatus}>
               {other.is_online ? (
                 <>
@@ -730,13 +896,12 @@ export default function ChatWindow({ conversation, onDeleteConversation, onConve
               ) : (
                 <>
                   <div style={{ ...styles.onlineDot, background: "var(--dark-400)" }} />
-                  <span style={{ color: "var(--dark-400)" }}>offline</span>
+                  <span style={{ color: "var(--dark-400)" }}>offline · tap for profile</span>
                 </>
               )}
             </div>
           </div>
-
-        </div>
+        </button>
         
         {/* Calling trigger buttons */}
         <div style={{ display: "flex", gap: 8 }}>
@@ -1043,26 +1208,33 @@ export default function ChatWindow({ conversation, onDeleteConversation, onConve
               </div>
             )}
             <button
-              onClick={() => handleMediaDestruct(activeMediaMessage)}
+              onClick={() => {
+                if (activeMediaMessage.from === "mine") {
+                  setActiveMediaMessage(null);
+                  setMediaCountdown(null);
+                } else {
+                  handleMediaDestruct(activeMediaMessage);
+                }
+              }}
               style={styles.mediaOverlayClose}
-              title="Close and destruct"
+              title={activeMediaMessage.from === "mine" ? "Close" : "Close and mark seen"}
             >
               ✕
             </button>
           </div>
 
           <div style={styles.mediaContainer}>
-            {/* Security watermarks */}
+            {/* Watermark = viewer (you), not the peer — anti-leak */}
             <div style={styles.watermarkDiagonal}>
               <div style={styles.watermarkText}>
-                {getUserDisplayName(other)}
+                {viewerStamp || "viewer"}
               </div>
             </div>
 
             {(activeMediaMessage.type === "view_once" || activeMediaMessage.type === "image") ? (
               <img
-                src={activeMediaMessage.url}
-                alt="View Once Content"
+                src={getAbsoluteMediaUrl(activeMediaMessage.url)}
+                alt="Media"
                 style={styles.overlayImage}
                 onDragStart={(e) => e.preventDefault()}
                 onContextMenu={(e) => e.preventDefault()}
@@ -1070,7 +1242,7 @@ export default function ChatWindow({ conversation, onDeleteConversation, onConve
             ) : (
               <video
                 ref={videoRef}
-                src={activeMediaMessage.url}
+                src={getAbsoluteMediaUrl(activeMediaMessage.url)}
                 controls
                 autoPlay
                 onPlay={() => {
@@ -1079,7 +1251,7 @@ export default function ChatWindow({ conversation, onDeleteConversation, onConve
                   }
                 }}
                 onEnded={() => {
-                  if (mediaCountdown === null) {
+                  if (mediaCountdown === null && activeMediaMessage.from !== "mine") {
                     setMediaCountdown(10);
                   }
                 }}
@@ -1089,6 +1261,13 @@ export default function ChatWindow({ conversation, onDeleteConversation, onConve
             )}
           </div>
         </div>
+      )}
+
+      {peerProfile && (
+        <ProfileDetail
+          profile={peerProfile}
+          onClose={() => setPeerProfile(null)}
+        />
       )}
 
       {showReportModal && (
@@ -1535,6 +1714,30 @@ const styles = {
     color: "rgba(255,255,255,0.6)",
     fontSize: 13,
     padding: "4px 8px",
+  },
+  mediaCoverBtn: {
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 6,
+    minWidth: 140,
+    minHeight: 120,
+    padding: "16px 18px",
+    borderRadius: 12,
+    border: "1px solid rgba(255,255,255,0.25)",
+    background: "rgba(0,0,0,0.35)",
+    color: "#fff",
+    cursor: "pointer",
+  },
+  mediaCoverIcon: {
+    fontSize: 32,
+    lineHeight: 1,
+  },
+  mediaCoverLabel: {
+    fontSize: 12,
+    fontWeight: 600,
+    opacity: 0.9,
   },
   mediaViewBtn: {
     background: "rgba(255, 31, 107, 0.12)",

@@ -2,9 +2,11 @@ import React, { useEffect, useState } from "react";
 import { profileAPI, matchAPI } from "../api";
 import { isCompactNav } from "../constants/breakpoints";
 import css from "../styles/Navbar.module.css";
+// SPYCE = Intent-First Dating (not AI). Blind Date is DISABLED / NOT SHIPPED
+// (Play Store / App Store moderation) — keep page code, do not list in nav.
 const navItems = [
   { id: "discover", label: "Discover", icon: "⬡" },
-  { id: "blind_date", label: "Blind Date", icon: "🎭" },
+  // { id: "blind_date", label: "Blind Date", icon: "🎭" }, // NOT SHIPPED
   { id: "matches", label: "Matches", icon: "♥" },
   { id: "chat", label: "Messages", icon: "✉" },
   { id: "confessions", label: "Confessions", icon: "🤫" },

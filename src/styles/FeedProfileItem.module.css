@@ -32,16 +32,26 @@
     overflow-x: hidden;
     overflow-y: visible;
     position: relative;
-    padding-bottom: 24px;
+    /* Reserve room so like CTA never sits under nav / bg edge */
+    padding-bottom: max(20px, env(safe-area-inset-bottom, 0px));
     border-bottom: 1px solid var(--dark-700);
   }
 
   .mobilePolaroidWrap {
     position: relative;
     width: calc(100% - 48px);
-    margin: 20px auto 10px;
+    /* Slightly smaller photo so username/details/bio sit higher and leave room for like */
+    margin: 12px auto 6px;
     aspect-ratio: 3 / 4;
+    max-height: min(52vh, 420px);
     perspective: 1000px;
+    flex-shrink: 1;
+  }
+
+  /* When bio is present, tighten photo so content block moves up */
+  .mobileCard:has(.mobileHandwrittenBio) .mobilePolaroidWrap {
+    margin: 8px auto 4px;
+    max-height: min(42vh, 340px);
   }
 
   .mobilePolaroidBack {
@@ -171,49 +181,80 @@
 
   .mobileInfoCenter {
     text-align: center;
-    padding: 20px 16px 10px;
+    /* Push username + details upward; leave clear gap above like button */
+    padding: 10px 16px 6px;
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: 8px;
+    gap: 6px;
+    flex: 0 1 auto;
+    min-width: 0;
+    width: 100%;
+    box-sizing: border-box;
+  }
+
+  .mobileInfoWithBio {
+    padding: 8px 16px 4px;
+    gap: 5px;
   }
 
   .mobileFunkyName {
     font-family: 'Bungee', sans-serif;
-    font-size: 28px;
+    font-size: 26px;
     color: #FFD700;
     margin: 0;
     text-shadow: 2px 2px 4px rgba(0,0,0,0.6);
     line-height: 1.1;
     -webkit-text-stroke: 1px rgba(0,0,0,0.5);
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
   }
 
   .mobileHandwrittenRow {
     font-family: 'Caveat', cursive;
-    font-size: 20px;
+    font-size: 18px;
     color: #FFD700;
     display: flex;
     flex-wrap: wrap;
     justify-content: center;
-    gap: 16px;
+    gap: 12px;
     font-weight: 700;
     text-shadow: 1px 1px 2px rgba(0,0,0,0.8);
   }
 
   .mobileHandwrittenBio {
     font-family: 'Caveat', cursive;
-    font-size: 18px;
+    font-size: 17px;
     color: #FFD700;
-    margin: 0;
-    line-height: 1.2;
+    margin: 2px 0 0;
+    line-height: 1.25;
     text-shadow: 1px 1px 2px rgba(0,0,0,0.8);
+    /* Industry-level: clamp any bio length so like CTA always has reserved space */
+    max-width: 100%;
+    padding: 0 4px;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    word-break: break-word;
   }
 
   .mobileActionCenter {
     display: flex;
     justify-content: center;
-    padding: 10px 0 20px;
-    margin-top: auto;
+    align-items: center;
+    /* Fixed reservation so background/content never covers the like button */
+    flex: 0 0 auto;
+    min-height: 96px;
+    padding: 8px 0 16px;
+    margin-top: 4px;
+    position: relative;
+    z-index: 5;
   }
 
   .mobileGlowingHeart {

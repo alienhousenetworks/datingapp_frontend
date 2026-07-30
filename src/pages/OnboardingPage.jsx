@@ -2,9 +2,19 @@ import React, { useState, useEffect } from "react";
 import { optionsAPI, profileAPI, verificationAPI } from "../api";
 import useSubscription from "../hooks/useSubscription";
 import { isValidUsername, normalizeUsername } from "../utils/userDisplay";
+import {
+  isProfileOnboarded,
+  setOnboardingLocalFlag,
+} from "../utils/onboarding";
 
 const MIN_BIO = 20;
 const TOTAL_STEPS = 5; // 1 basics · 2 identity · 3 bio · 4 face · 5 welcome
+
+function idOf(value) {
+  if (value == null || value === "") return "";
+  if (typeof value === "object") return String(value.id || value.pk || "");
+  return String(value);
+}
 
 export default function OnboardingPage({ onComplete }) {
   const [step, setStep] = useState(1);
@@ -16,6 +26,8 @@ export default function OnboardingPage({ onComplete }) {
   const [bio, setBio] = useState("");
   const [faceVerified, setFaceVerified] = useState(false);
   const [verifying, setVerifying] = useState(false);
+  /** Existing username on this account — availability check must allow it */
+  const [existingUsername, setExistingUsername] = useState("");
 
   const [genderOpts, setGenderOpts] = useState([]);
   const [sexualityOpts, setSexualityOpts] = useState([]);
@@ -26,22 +38,57 @@ export default function OnboardingPage({ onComplete }) {
   const subscription = useSubscription(true);
 
   useEffect(() => {
-    const fetchOptions = async () => {
+    let cancelled = false;
+    const bootstrap = async () => {
       try {
-        const [genders, sexualities] = await Promise.all([
+        const [genders, sexualities, profile] = await Promise.all([
           optionsAPI.getGenders().catch(() => []),
           optionsAPI.getSexualities().catch(() => []),
+          profileAPI.getMyProfile().catch(() => null),
         ]);
+        if (cancelled) return;
+
         setGenderOpts(Array.isArray(genders) ? genders : []);
         setSexualityOpts(Array.isArray(sexualities) ? sexualities : []);
+
+        // Already finished signup → leave onboarding immediately
+        if (profile && isProfileOnboarded(profile)) {
+          setOnboardingLocalFlag(profile.id || profile.user_id);
+          onComplete?.();
+          return;
+        }
+
+        // Prefill whatever exists so returning users aren't blank forms
+        if (profile && !profile.error) {
+          const uname = (profile.username || "").toString().trim();
+          if (uname) {
+            setUsername(uname);
+            setExistingUsername(normalizeUsername(uname));
+          }
+          if (profile.date_of_birth) setDob(String(profile.date_of_birth).slice(0, 10));
+          const g = idOf(profile.gender ?? profile.gender_detail);
+          if (g) setGender(g);
+          const s = idOf(profile.sexuality ?? profile.sexuality_detail);
+          if (s) setSexuality(s);
+          const prefs = profile.preferred_genders || profile.preferred_genders_detail || [];
+          if (Array.isArray(prefs) && prefs.length) {
+            setPreferredGenders(prefs.map(idOf).filter(Boolean));
+          }
+          if (profile.bio) setBio(String(profile.bio));
+        }
       } catch {
         setGenderOpts([]);
         setSexualityOpts([]);
       } finally {
-        setLoading(false);
+        if (!cancelled) setLoading(false);
       }
     };
-    fetchOptions();
+    bootstrap();
+    return () => {
+      cancelled = true;
+    };
+    // Run once on mount — parent onComplete identity changes every render
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const ageFromDob = (raw) => {
@@ -83,15 +130,18 @@ export default function OnboardingPage({ onComplete }) {
         setError("You must be at least 18 years old to use SPYCE.");
         return;
       }
-      try {
-        const check = await profileAPI.checkUsernameAvailable(normalized);
-        if (!check.available) {
-          setError(check.error || "This username is already taken.");
+      // Allow keeping your own existing username (returning users in onboarding)
+      if (normalized !== existingUsername) {
+        try {
+          const check = await profileAPI.checkUsernameAvailable(normalized);
+          if (!check.available) {
+            setError(check.error || "This username is already taken.");
+            return;
+          }
+        } catch (err) {
+          setError(err.message || "Could not verify username. Please try again.");
           return;
         }
-      } catch (err) {
-        setError(err.message || "Could not verify username. Please try again.");
-        return;
       }
     }
 

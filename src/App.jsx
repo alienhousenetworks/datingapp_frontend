@@ -27,6 +27,10 @@ import useSubscription from "./hooks/useSubscription";
 import { profileAPI, wsURL, authAPI } from "./api";
 import { useEffect } from "react";
 import SubscriptionPaywall from "./components/SubscriptionPaywall";
+import {
+  shouldShowOnboarding,
+  setOnboardingLocalFlag,
+} from "./utils/onboarding";
 
 export default function App() {
   const [screen, setScreen] = useState("splash");
@@ -113,33 +117,62 @@ export default function App() {
     };
   }, [screen]);
 
-  const checkOnboarding = async () => {
+  const enterApp = (userId) => {
+    if (userId) setOnboardingLocalFlag(userId);
+    setScreen("app");
+    setShowMood(true);
+  };
+
+  /**
+   * Returning users must NOT be forced through signup again.
+   * Use core profile fields (not only is_discoverable — that is false when
+   * paused/hidden or for some older accounts).
+   */
+  const checkOnboarding = async (sessionUser) => {
+    const userId = sessionUser?.id || auth.user?.id;
     try {
       const profile = await profileAPI.getMyProfile();
-      // Profile must be discoverable before entering the app feed
-      if (profile?.is_discoverable) {
-        setScreen("app");
-        setShowMood(true);
-      } else {
-        setScreen("onboarding");
+      // Token valid but profile missing / soft error payload
+      if (
+        profile?.error ||
+        profile?.detail === "Authentication credentials were not provided."
+      ) {
+        setScreen("auth");
+        return;
       }
-    } catch {
-      // Fallback to app in case of errors/offline demo mode
+      const id = userId || profile?.id || profile?.user_id;
+      if (shouldShowOnboarding(profile, id)) {
+        setScreen("onboarding");
+      } else {
+        enterApp(id);
+      }
+    } catch (err) {
+      // Network blip after login: if we already know this user finished
+      // onboarding locally, stay in the app — never re-run signup.
+      if (userId && !shouldShowOnboarding(null, userId)) {
+        enterApp(userId);
+        return;
+      }
+      if (err?.status === 401 || err?.status === 403) {
+        setScreen("auth");
+        return;
+      }
+      // Prefer app over trapping returning users in onboarding on transient errors
       setScreen("app");
     }
   };
 
   const handleSplashDone = async () => {
-    const loggedIn = await auth.loadUser();
-    if (loggedIn) {
-      await checkOnboarding();
+    const me = await auth.loadUser();
+    if (me) {
+      await checkOnboarding(me);
     } else {
       setScreen("auth");
     }
   };
 
-  const handleLogin = async () => {
-    await checkOnboarding();
+  const handleLogin = async (sessionUser) => {
+    await checkOnboarding(sessionUser || auth.user);
   };
 
   const handleLogout = async () => {
@@ -160,8 +193,7 @@ export default function App() {
     return (
       <OnboardingPage
         onComplete={() => {
-          setScreen("app");
-          setShowMood(true);
+          enterApp(auth.user?.id);
         }}
       />
     );

@@ -37,18 +37,32 @@ export default function useAuth() {
       if (!ok) {
         setError(data.error || "Invalid OTP. Try again.");
       } else {
-        const loggedIn = await loadUser();
-        if (loggedIn) {
-          onLogin();
+        // is_new from OTP is informational only — never force signup UI from it.
+        // Existing accounts also log in through the same OTP path.
+        const me = await loadUser();
+        if (me) {
+          onLogin?.(me);
         } else {
-          setUser({ id: data.user_id || "demo-user", email, is_new: true });
-          onLogin();
+          // Tokens saved but /users/me failed — still log in; App will gate on profile.
+          const fallback = {
+            id: data.user_id || data.user?.id || null,
+            email,
+            is_new: data.is_new === true,
+          };
+          setUser(fallback);
+          onLogin?.(fallback);
         }
       }
     } catch {
       // Offline / Demo fallback
-      setUser({ id: "demo-user", email: email || "demo@spyce.com", name: "Demo User", is_new: false });
-      onLogin(); // demo fallback
+      const demo = {
+        id: "demo-user",
+        email: email || "demo@spyce.com",
+        name: "Demo User",
+        is_new: false,
+      };
+      setUser(demo);
+      onLogin?.(demo);
     } finally {
       setLoading(false);
     }
@@ -78,17 +92,18 @@ export default function useAuth() {
     setMsg("");
   };
 
+  /** @returns {object|null} user payload when session is valid */
   const loadUser = async () => {
-    if (!getAccessToken()) return false;
+    if (!getAccessToken()) return null;
     try {
       const data = await userAPI.getMe();
-      if (data.id) {
+      if (data?.id) {
         setUser(data);
-        return true;
+        return data;
       }
-      return false;
+      return null;
     } catch {
-      return false;
+      return null;
     }
   };
 

@@ -545,17 +545,26 @@ export const chatAPI = {
     return res.json();
   },
 
-  // Send a message (REST alternative to WebSocket)
+  // Send a message (REST — primary path for web client reliability)
   sendMessage: async (conversationId, text) => {
     const res = await apiFetch("/messages/", {
       method: "POST",
       body: JSON.stringify({
         conversation: conversationId,
-        content: { text },
+        content: { text: String(text || "") },
         message_type: "text",
       }),
     });
-    return res.json();
+    // apiFetch throws on !ok; parse body
+    const data = await res.json();
+    if (!data || (!data.id && data.error)) {
+      const err = new Error(
+        data?.error || data?.detail || "Send message failed",
+      );
+      err.data = data;
+      throw err;
+    }
+    return data;
   },
 
   // Mark message as seen
@@ -907,8 +916,21 @@ export const geoAPI = {
     const res = await apiFetch(`/geo/reverse/?lat=${lat}&lng=${lng}`);
     return res.json();
   },
-  autocompleteCity: async (query) => {
-    const res = await apiFetch(`/geo/autocomplete/?q=${encodeURIComponent(query)}`);
+  /** City suggestions: GET /geo/autocomplete/?q= (alias /geo/cities/) */
+  autocompleteCity: async (query, limit = 12) => {
+    const q = (query || "").trim();
+    if (q.length < 2) return [];
+    const res = await apiFetch(
+      `/geo/autocomplete/?q=${encodeURIComponent(q)}&limit=${limit}`,
+    );
+    return res.json();
+  },
+  suggestCities: async (query, limit = 12) => {
+    const q = (query || "").trim();
+    if (q.length < 2) return [];
+    const res = await apiFetch(
+      `/geo/cities/?q=${encodeURIComponent(q)}&limit=${limit}`,
+    );
     return res.json();
   },
 };

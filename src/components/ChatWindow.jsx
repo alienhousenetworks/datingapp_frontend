@@ -5,10 +5,106 @@ import ProfileDetail from "./ProfileDetail";
 
 const getAbsoluteMediaUrl = (url) => {
   if (!url) return null;
-  if (url.startsWith("http://") || url.startsWith("https://")) return url;
+  if (url.startsWith("http://") || url.startsWith("https://") || url.startsWith("blob:")) {
+    return url;
+  }
   return `${API_BASE_URL}${url.startsWith("/") ? "" : "/"}${url}`;
 };
 
+const MEDIA_TYPES = new Set([
+  "image",
+  "video",
+  "view_once",
+  "view_once_video",
+  "audio",
+]);
+
+const isLocalMsgId = (id) => {
+  if (id == null) return false;
+  if (typeof id === "number") return true;
+  const s = String(id);
+  return s.startsWith("local-") || s.startsWith("temp");
+};
+
+const mapServerMessage = (m) => {
+  const content = m?.content;
+  let text = "";
+  let url = null;
+  if (content && typeof content === "object") {
+    text = content.text || "";
+    url = getAbsoluteMediaUrl(content.url || content.media_url || content.image_url);
+  } else if (typeof content === "string") {
+    text = content;
+  } else {
+    text = m?.text || "";
+    url = getAbsoluteMediaUrl(m?.url || m?.media_url);
+  }
+  const type = (m.message_type || m.type || "text").toString().toLowerCase();
+  if (!text && url) {
+    if (type.includes("video")) text = "🎥 Video";
+    else if (MEDIA_TYPES.has(type)) text = "📷 Photo";
+  }
+  return {
+    id: m.id,
+    from: m.is_me || m.from === "mine" ? "mine" : "them",
+    text,
+    url,
+    type,
+    is_seen: !!m.is_seen,
+    delivered_at: m.delivered_at || null,
+    is_deleted: !!m.is_deleted,
+    time: m.created_at || m.time || new Date().toISOString(),
+    reactions: m.reactions || [],
+    pending: false,
+    failed: false,
+    client_message_id: m.client_message_id || null,
+  };
+};
+
+/** Merge server history with local optimistic rows (pending text/media). */
+const mergeMessages = (serverList, prevLocal = []) => {
+  const server = (serverList || []).map(mapServerMessage);
+  const byId = new Map(server.map((m) => [String(m.id), m]));
+  const pending = (prevLocal || []).filter((m) => {
+    if (!isLocalMsgId(m.id)) return false;
+    if (m.failed) return true; // keep failed so user sees error
+    // Drop optimistic if server already has same text (own) within ~2 min
+    if (m.from === "mine" && m.text && !MEDIA_TYPES.has(m.type)) {
+      const hit = server.find(
+        (s) =>
+          s.from === "mine" &&
+          s.text === m.text &&
+          Math.abs(new Date(s.time) - new Date(m.time || 0)) < 120000,
+      );
+      if (hit) return false;
+    }
+    // Keep pending media until server has a media row for us
+    if (MEDIA_TYPES.has(m.type) && m.pending) {
+      const hasMineMedia = server.some(
+        (s) => s.from === "mine" && MEDIA_TYPES.has(s.type) && !s.is_deleted,
+      );
+      // Only drop if a *new* media arrived after this optimistic was created
+      if (hasMineMedia) {
+        const mineMedia = server.filter(
+          (s) => s.from === "mine" && MEDIA_TYPES.has(s.type),
+        );
+        const optT = new Date(m.time || 0).getTime();
+        const newer = mineMedia.some(
+          (s) => new Date(s.time).getTime() >= optT - 5000,
+        );
+        if (newer) return false;
+      }
+      return true;
+    }
+    return m.pending === true;
+  });
+  const merged = [...server];
+  for (const p of pending) {
+    if (!byId.has(String(p.id))) merged.push(p);
+  }
+  merged.sort((a, b) => new Date(a.time || 0) - new Date(b.time || 0));
+  return merged;
+};
 
 const COLORS = ["#FF1F6B", "#A855F7", "#06B6D4", "#F59E0B", "#10B981"];
 const getColor = (i) => COLORS[i % COLORS.length];
@@ -18,6 +114,7 @@ export default function ChatWindow({ conversation, onDeleteConversation, onConve
   const [input, setInput] = useState("");
   const [typing, setTyping] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [sending, setSending] = useState(false);
   
   // New features state
   const [activePickerMsgId, setActivePickerMsgId] = useState(null);
@@ -194,13 +291,27 @@ export default function ChatWindow({ conversation, onDeleteConversation, onConve
       // Covered photo icon — tap opens fullscreen with viewer watermark
       return (
         <button
-          onClick={() => setActiveMediaMessage(m)}
+          onClick={() => {
+            if (!m.url) {
+              alert(
+                m.pending
+                  ? "Media is still uploading/processing…"
+                  : "Media URL not available yet. Try reopening the chat.",
+              );
+              return;
+            }
+            setActiveMediaMessage(m);
+          }}
           style={styles.mediaCoverBtn}
           title={m.from === "mine" ? "Your photo — tap to preview" : "Tap to view"}
         >
           <span style={styles.mediaCoverIcon}>📷</span>
           <span style={styles.mediaCoverLabel}>
-            {m.from === "mine" ? "Photo · tap to view" : "Tap to view photo"}
+            {m.pending
+              ? "Uploading…"
+              : m.from === "mine"
+                ? "Photo · tap to view"
+                : "Tap to view photo"}
           </span>
         </button>
       );
@@ -216,19 +327,38 @@ export default function ChatWindow({ conversation, onDeleteConversation, onConve
       }
       return (
         <button
-          onClick={() => setActiveMediaMessage(m)}
+          onClick={() => {
+            if (!m.url) {
+              alert(
+                m.pending
+                  ? "Video is still uploading/processing…"
+                  : "Video not available yet. Try reopening the chat.",
+              );
+              return;
+            }
+            setActiveMediaMessage(m);
+          }}
           style={styles.mediaCoverBtn}
           title={m.from === "mine" ? "Your video — tap to preview" : "Tap to play"}
         >
           <span style={styles.mediaCoverIcon}>🎥</span>
           <span style={styles.mediaCoverLabel}>
-            {m.from === "mine" ? "Video · tap to view" : "Tap to play video"}
+            {m.pending
+              ? "Uploading…"
+              : m.from === "mine"
+                ? "Video · tap to view"
+                : "Tap to play video"}
           </span>
         </button>
       );
     }
     
-    return <span>{m.text}</span>;
+    return (
+      <span style={m.failed ? { opacity: 0.85, color: "#FCA5A5" } : undefined}>
+        {m.text}
+        {m.pending && !m.failed ? " …" : ""}
+      </span>
+    );
   };
 
   const wsRef = useRef(null);
@@ -307,59 +437,56 @@ export default function ChatWindow({ conversation, onDeleteConversation, onConve
 
     const handleGlobalNewMessage = (e) => {
       const payload = e.detail;
-      if (payload && String(payload.conversation_id) === String(conversation.id)) {
-        const data = payload.message;
-        if (data) {
-          const other = conversation.other_user || {};
-          const isMine = String(data.sender) !== String(other.id);
-          
-          if (!isMine && !data.is_seen) {
-            try {
-              chatAPI.markSeen(data.id);
-            } catch (err) {
-              console.error("Failed to mark incoming global message as seen", err);
-            }
-          }
-
-          setMessages((prev) => {
-            if (prev.some((m) => m.id === data.id)) return prev;
-            if (isMine) {
-              const optIndex = prev.findIndex((m) => typeof m.id === "number" && m.text === data.content?.text);
-              if (optIndex !== -1) {
-                const updated = [...prev];
-                updated[optIndex] = {
-                  id: data.id,
-                  from: "mine",
-                  text: data.content?.text || "",
-                  url: getAbsoluteMediaUrl(data.content?.url),
-                  type: data.message_type || "text",
-                  is_seen: data.is_seen,
-                  delivered_at: data.delivered_at,
-                  is_deleted: data.is_deleted,
-                  time: data.created_at,
-                  reactions: data.reactions || [],
-                };
-                return updated;
-              }
-            }
-            return [
-              ...prev,
-              {
-                id: data.id,
-                from: isMine ? "mine" : "them",
-                text: data.content?.text || "",
-                url: getAbsoluteMediaUrl(data.content?.url),
-                type: data.message_type || "text",
-                is_seen: data.is_seen || !isMine,
-                delivered_at: data.delivered_at,
-                is_deleted: data.is_deleted,
-                time: data.created_at,
-                reactions: data.reactions || [],
-              },
-            ];
-          });
-        }
+      if (
+        !payload ||
+        String(payload.conversation_id) !== String(conversation.id)
+      ) {
+        return;
       }
+      const data = payload.message;
+      if (!data) return;
+
+      const other = conversation.other_user || {};
+      const senderId =
+        typeof data.sender === "object" ? data.sender?.id : data.sender;
+      // is_me from API when present; else compare sender vs peer
+      let isMine = data.is_me === true || data.from === "mine";
+      if (data.is_me == null && data.from == null && senderId != null) {
+        isMine = other?.id != null && String(senderId) !== String(other.id);
+      }
+
+      const mapped = mapServerMessage({
+        ...data,
+        is_me: isMine,
+      });
+
+      if (
+        mapped.from !== "mine" &&
+        !mapped.is_seen &&
+        !MEDIA_TYPES.has(mapped.type) &&
+        mapped.id &&
+        !isLocalMsgId(mapped.id)
+      ) {
+        chatAPI.markSeen(mapped.id).catch(() => {});
+      }
+
+      setMessages((prev) => {
+        if (prev.some((m) => String(m.id) === String(mapped.id))) return prev;
+        if (mapped.from === "mine") {
+          const optIndex = prev.findIndex(
+            (m) =>
+              isLocalMsgId(m.id) &&
+              m.text === mapped.text &&
+              !MEDIA_TYPES.has(m.type),
+          );
+          if (optIndex !== -1) {
+            const updated = [...prev];
+            updated[optIndex] = mapped;
+            return updated;
+          }
+        }
+        return [...prev, mapped];
+      });
     };
 
     window.addEventListener("new_message", handleGlobalNewMessage);
@@ -375,7 +502,7 @@ export default function ChatWindow({ conversation, onDeleteConversation, onConve
     const pollInterval = setInterval(() => {
       // Only poll if WebSocket is not open (saves bandwidth)
       if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
-        loadMessages();
+        loadMessages({ soft: true });
       }
     }, 15000);
     return () => clearInterval(pollInterval);
@@ -411,56 +538,55 @@ export default function ChatWindow({ conversation, onDeleteConversation, onConve
   }, [input, conversation?.id]);
 
   // ── Load message history from REST ─────────────────────
-  const loadMessages = async () => {
-    setLoading(true);
+  // soft=true: background refresh (poll/WS) — keep optimistic pending rows
+  const loadMessages = async (opts = {}) => {
+    const soft = !!opts.soft;
+    if (!conversation?.id) return [];
+    if (!soft) setLoading(true);
     try {
       const data = await chatAPI.getMessages(conversation.id);
-      // API returns newest first — reverse for display
-      const msgs = Array.isArray(data)
-        ? data.reverse()
-        : (data.results || []).reverse();
+      // API returns newest first — reverse for chronological UI
+      const raw = Array.isArray(data)
+        ? [...data].reverse()
+        : [...(data.results || [])].reverse();
 
-      // Mark unseen *text* only — media is marked when the user opens it
-      // (auto-seen was deleting view-once media before open).
-      const mediaTypes = new Set([
-        "image",
-        "video",
-        "view_once",
-        "view_once_video",
-        "audio",
-      ]);
-      msgs.forEach(async (m) => {
+      // Mark unseen *text* only — never auto-open media
+      raw.forEach(async (m) => {
         if (!m.is_me && !m.is_seen) {
           const mt = (m.message_type || m.type || "text").toString().toLowerCase();
-          if (mediaTypes.has(mt)) return;
+          if (MEDIA_TYPES.has(mt)) return;
           try {
             const messageId = m.id ? String(m.id) : null;
-            if (!messageId || messageId.startsWith("temp") || messageId.startsWith("local-")) return;
+            if (!messageId || isLocalMsgId(messageId)) return;
             await chatAPI.markSeen(messageId);
-          } catch (e) {
-            console.warn("[Chat Sync] Message ID not yet ready on backend server.");
+          } catch {
+            /* ignore */
           }
         }
       });
 
-      setMessages(
-        msgs.map((m) => ({
-          id: m.id,
-          from: m.is_me ? "mine" : "them",
-          text: m.content?.text || "",
-          url: getAbsoluteMediaUrl(m.content?.url),
-          type: m.message_type || "text",
-          is_seen: m.is_seen,
-          delivered_at: m.delivered_at,
-          is_deleted: m.is_deleted,
-          time: m.created_at,
-          reactions: m.reactions || [],
-        })),
-      );
-    } catch {
-      setMessages([]);
+      let merged = [];
+      setMessages((prev) => {
+        // soft refresh: keep pending/failed optimistics; hard load still keeps
+        // in-flight sends for *this* conversation so media/text don't vanish
+        const keepLocal = (prev || []).filter(
+          (m) =>
+            (m.pending || m.failed) &&
+            isLocalMsgId(m.id),
+        );
+        merged = mergeMessages(raw, keepLocal);
+        return merged;
+      });
+      return merged;
+    } catch (err) {
+      console.error("loadMessages failed", err);
+      if (!soft) {
+        // Keep any optimistic local messages on hard load failure
+        setMessages((prev) => prev.filter((m) => m.pending || m.failed));
+      }
+      return [];
     } finally {
-      setLoading(false);
+      if (!soft) setLoading(false);
     }
   };
 
@@ -511,75 +637,87 @@ export default function ChatWindow({ conversation, onDeleteConversation, onConve
         };
 
         ws.onmessage = (e) => {
-          const data = JSON.parse(e.data);
+          let data;
+          try {
+            data = JSON.parse(e.data);
+          } catch {
+            return;
+          }
+
+          if (data.type === "error") {
+            console.error("Chat WS error:", data.message || data);
+            return;
+          }
+
           if (data.type === "message") {
-            const isMine = data.is_me;
-            
-            // Mark incoming message as seen immediately if we are viewing the chat
-            if (!isMine && !data.is_seen) {
-              try {
-                chatAPI.markSeen(data.id);
-              } catch (err) {
-                console.error("Failed to mark incoming message as seen", err);
-              }
+            const mapped = mapServerMessage({
+              ...data,
+              is_me: data.is_me === true,
+            });
+            // Do not auto-mark media seen
+            if (
+              mapped.from !== "mine" &&
+              !mapped.is_seen &&
+              !MEDIA_TYPES.has(mapped.type) &&
+              mapped.id &&
+              !isLocalMsgId(mapped.id)
+            ) {
+              chatAPI.markSeen(mapped.id).catch(() => {});
             }
 
             setMessages((prev) => {
-              if (prev.some((m) => m.id === data.id)) return prev;
-              if (isMine) {
-                const optIndex = prev.findIndex((m) => typeof m.id === "number" && m.text === data.content?.text);
+              if (prev.some((m) => String(m.id) === String(mapped.id))) {
+                return prev;
+              }
+              // Replace optimistic local text bubble
+              if (mapped.from === "mine") {
+                const optIndex = prev.findIndex(
+                  (m) =>
+                    isLocalMsgId(m.id) &&
+                    m.from === "mine" &&
+                    !MEDIA_TYPES.has(m.type) &&
+                    m.text === mapped.text,
+                );
                 if (optIndex !== -1) {
                   const updated = [...prev];
-                  updated[optIndex] = {
-                    id: data.id,
-                    from: "mine",
-                    text: data.content?.text || "",
-                    url: getAbsoluteMediaUrl(data.content?.url),
-                    type: data.message_type || "text",
-                    is_seen: data.is_seen || !isMine,
-                    delivered_at: data.delivered_at,
-                    is_deleted: data.is_deleted,
-                    time: data.created_at,
-                    reactions: data.reactions || [],
-                  };
+                  updated[optIndex] = mapped;
                   return updated;
                 }
               }
-              return [
-                ...prev,
-                {
-                  id: data.id,
-                  from: isMine ? "mine" : "them",
-                  text: data.content?.text || "",
-                  url: getAbsoluteMediaUrl(data.content?.url),
-                  type: data.message_type || "text",
-                  is_seen: data.is_seen || !isMine,
-                  delivered_at: data.delivered_at,
-                  is_deleted: data.is_deleted,
-                  time: data.created_at,
-                  reactions: data.reactions || [],
-                },
-              ];
+              return [...prev, mapped];
             });
-            // Dispatch global custom event so sidebar conversation previews update in real time
             window.dispatchEvent(
               new CustomEvent("new_message", {
                 detail: { conversation_id: conversation.id, message: data },
-              })
+              }),
             );
           } else if (data.type === "message_update") {
             setMessages((prev) =>
               prev.map((m) =>
-                m.id === data.message_id
+                String(m.id) === String(data.message_id)
                   ? {
                       ...m,
-                      is_seen: data.is_seen !== undefined ? data.is_seen : m.is_seen,
-                      delivered_at: data.delivered_at !== undefined ? data.delivered_at : m.delivered_at,
-                      is_deleted: data.is_deleted !== undefined ? data.is_deleted : m.is_deleted,
-                      text: data.content?.text !== undefined ? data.content.text : m.text,
+                      is_seen:
+                        data.is_seen !== undefined ? data.is_seen : m.is_seen,
+                      delivered_at:
+                        data.delivered_at !== undefined
+                          ? data.delivered_at
+                          : m.delivered_at,
+                      is_deleted:
+                        data.is_deleted !== undefined
+                          ? data.is_deleted
+                          : m.is_deleted,
+                      text:
+                        data.content?.text !== undefined
+                          ? data.content.text
+                          : m.text,
+                      url:
+                        data.content?.url !== undefined
+                          ? getAbsoluteMediaUrl(data.content.url)
+                          : m.url,
                     }
-                  : m
-              )
+                  : m,
+              ),
             );
           }
           if (data.type === "typing") {
@@ -624,119 +762,220 @@ export default function ChatWindow({ conversation, onDeleteConversation, onConve
     connect();
   };
 
-  // ── Send message ────────────────────────────────────────
+  // ── Send message (REST primary — WS alone was dropping sends) ──
   const send = async () => {
+    if (!conversation?.id) return;
+    if (sending || uploadingMedia) return;
+
+    // ── Media path ───────────────────────────────────────
     if (selectedFile) {
       const file = selectedFile;
-      const type = mediaType === "video" ? "view_once_video" : "view_once";
+      // Prefer durable image/video types; view_once still supported
+      const type =
+        mediaType === "video" ? "video" : "image";
       const localPreview = previewUrl;
-      
+
       setSelectedFile(null);
       setMediaType("");
-      
-      // Optimistic bubble so sender never loses media while processing
+      setPreviewUrl(null);
+
       const tempId = `local-media-${Date.now()}`;
       const optimistic = {
         id: tempId,
         from: "mine",
         type,
         url: localPreview || null,
-        text: type.includes("video") ? "🎥 Sending video…" : "📷 Sending photo…",
+        text: type === "video" ? "🎥 Sending video…" : "📷 Sending photo…",
         time: new Date().toISOString(),
         reactions: [],
         pending: true,
+        failed: false,
       };
       setMessages((prev) => [...prev, optimistic]);
-      setPreviewUrl(null);
-      
       setUploadingMedia(true);
+
       try {
         const res = await chatAPI.uploadMedia(conversation.id, file, type);
-        // Poll a few times for the real message
-        let found = false;
-        for (let i = 0; i < 10; i++) {
-          await new Promise((r) => setTimeout(r, i === 0 ? 900 : 1200));
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === tempId
+              ? {
+                  ...m,
+                  text:
+                    type === "video"
+                      ? "🎥 Processing video…"
+                      : "📷 Processing photo…",
+                }
+              : m,
+          ),
+        );
+
+        // Poll until media appears on server — never drop optimistic early
+        let foundMedia = false;
+        for (let i = 0; i < 12; i++) {
+          await new Promise((r) => setTimeout(r, i === 0 ? 900 : 1300));
           try {
-            await loadMessages();
-            // loadMessages replaces list — check after load in next tick via messages is hard;
-            // if upload accepted, show status from server
-            found = true;
-            break;
-          } catch (pollErr) {
-            if (i === 9) throw pollErr;
+            const list = await loadMessages({ soft: true });
+            foundMedia = (list || []).some(
+              (m) =>
+                m.from === "mine" &&
+                MEDIA_TYPES.has(m.type) &&
+                !isLocalMsgId(m.id) &&
+                !m.is_deleted &&
+                new Date(m.time).getTime() >=
+                  new Date(optimistic.time).getTime() - 15000,
+            );
+            if (foundMedia) break;
+          } catch {
+            /* keep polling */
           }
         }
-        if (found) {
-          // Drop temp if server message present
+
+        if (foundMedia) {
           setMessages((prev) => prev.filter((m) => m.id !== tempId));
+        } else {
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === tempId
+                ? {
+                    ...m,
+                    pending: true,
+                    text:
+                      `📷 Upload accepted (${res?.status || "processing"}) — ` +
+                      "still processing. Pull chat open again in a moment.",
+                  }
+                : m,
+            ),
+          );
         }
-        // Soft success toast for testing
-        console.info("Media upload response:", res);
       } catch (err) {
         console.error("Failed to upload media", err);
+        const detail =
+          err?.message ||
+          (err?.data ? JSON.stringify(err.data) : String(err));
         setMessages((prev) =>
           prev.map((m) =>
             m.id === tempId
               ? {
                   ...m,
                   pending: false,
-                  text: `Failed: ${err?.message || err}${
-                    err?.data ? ` | ${JSON.stringify(err.data)}` : ""
-                  }`,
+                  failed: true,
+                  text: `Failed to send media: ${detail}`,
                 }
               : m,
           ),
         );
-        alert(
-          `Failed to send media:\n${err?.message || err}${
-            err?.data ? `\n${JSON.stringify(err.data, null, 2)}` : ""
-          }`,
-        );
+        alert(`Failed to send media:\n${detail}`);
       } finally {
         setUploadingMedia(false);
-        if (localPreview) {
-          try {
-            URL.revokeObjectURL(localPreview);
-          } catch {
-            /* ignore */
-          }
-        }
       }
       return;
     }
 
+    // ── Text path ────────────────────────────────────────
     const text = input.trim();
-    if (!text || !conversation?.id) return;
+    if (!text) return;
 
-    // Optimistic UI — add message immediately
+    const tempId = `local-${Date.now()}`;
     const tempMsg = {
-      id: Date.now(),
+      id: tempId,
       from: "mine",
       text,
+      type: "text",
       time: new Date().toISOString(),
       reactions: [],
+      pending: true,
+      failed: false,
     };
     setMessages((prev) => [...prev, tempMsg]);
     setInput("");
+    setSending(true);
 
-    // Clear backend draft
     try {
-      chatAPI.saveDraft(conversation.id, "");
-    } catch {}
+      chatAPI.saveDraft(conversation.id, "").catch(() => {});
+    } catch {
+      /* ignore */
+    }
 
-    // Try WebSocket first, fall back to REST
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(
-        JSON.stringify({
-          type: "message",
-          content: text,
-          message_type: "text",
+    let delivered = false;
+    let serverMsg = null;
+
+    try {
+      // 1) REST is source of truth (reliable)
+      try {
+        serverMsg = await chatAPI.sendMessage(conversation.id, text);
+        delivered = !!(serverMsg && (serverMsg.id || serverMsg.content));
+      } catch (restErr) {
+        console.error("REST send failed", restErr);
+        // 2) WS fallback if REST failed
+        try {
+          if (wsRef.current?.readyState === WebSocket.OPEN) {
+            wsRef.current.send(
+              JSON.stringify({
+                type: "message",
+                content: { text },
+                message_type: "text",
+                client_message_id: tempId,
+              }),
+            );
+            delivered = true;
+          }
+        } catch (wsErr) {
+          console.error("WS send failed", wsErr);
+        }
+
+        if (!delivered) {
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === tempId
+                ? {
+                    ...m,
+                    pending: false,
+                    failed: true,
+                    text: `${text}\n⚠ Failed: ${restErr?.message || "Could not send"}`,
+                  }
+                : m,
+            ),
+          );
+          return;
+        }
+      }
+
+      if (serverMsg && serverMsg.id) {
+        const mapped = mapServerMessage({ ...serverMsg, is_me: true });
+        setMessages((prev) => {
+          const without = prev.filter((m) => m.id !== tempId);
+          if (without.some((m) => String(m.id) === String(mapped.id))) {
+            return without;
+          }
+          return [...without, mapped];
+        });
+      } else {
+        // WS-only path: soft-reload to confirm
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === tempId ? { ...m, pending: true, text } : m,
+          ),
+        );
+        setTimeout(() => loadMessages({ soft: true }), 800);
+      }
+
+      window.dispatchEvent(
+        new CustomEvent("new_message", {
+          detail: {
+            conversation_id: conversation.id,
+            message: serverMsg || {
+              id: tempId,
+              content: { text },
+              is_me: true,
+              message_type: "text",
+              created_at: tempMsg.time,
+            },
+          },
         }),
       );
-    } else {
-      try {
-        await chatAPI.sendMessage(conversation.id, text);
-      } catch {}
+    } finally {
+      setSending(false);
     }
   };
 
@@ -1162,8 +1401,8 @@ export default function ChatWindow({ conversation, onDeleteConversation, onConve
             type="button"
             style={styles.attachBtn}
             onClick={() => fileInputRef.current?.click()}
-            disabled={uploadingMedia}
-            title="Send self-destructing media"
+            disabled={uploadingMedia || sending}
+            title="Send photo or video"
           >
             {uploadingMedia ? "..." : "📎"}
           </button>
@@ -1188,8 +1427,13 @@ export default function ChatWindow({ conversation, onDeleteConversation, onConve
             onKeyDown={(e) => e.key === "Enter" && send()}
             disabled={uploadingMedia || !!previewUrl}
           />
-          <button style={styles.sendBtn} onClick={send} disabled={uploadingMedia}>
-            ↑
+          <button
+            style={styles.sendBtn}
+            onClick={send}
+            disabled={uploadingMedia || sending || (!input.trim() && !selectedFile)}
+            title={sending ? "Sending…" : "Send"}
+          >
+            {sending ? "…" : "↑"}
           </button>
         </div>
       )}

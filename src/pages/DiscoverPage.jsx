@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import FeedProfileItem from "../components/FeedProfileItem";
 import SubscriptionPaywall from "../components/SubscriptionPaywall";
-import { feedAPI, interactionAPI, optionsAPI, subscriptionAPI } from "../api";
+import { feedAPI, interactionAPI, optionsAPI, subscriptionAPI, geoAPI } from "../api";
 import useSubscription from "../hooks/useSubscription";
 import discoverStyles from "../styles/DiscoverPage.module.css";
 
@@ -68,8 +68,13 @@ export default function DiscoverPage({ user, setTab }) {
   const [intentOpts, setIntentOpts] = useState([]);
   const [genderOpts, setGenderOpts] = useState([]);
   const [purchasing, setPurchasing] = useState(false);
+  const [citySuggestions, setCitySuggestions] = useState([]);
+  const [citySuggestLoading, setCitySuggestLoading] = useState(false);
+  const [showCitySuggest, setShowCitySuggest] = useState(false);
   const layoutRef = useRef(null);
   const gridRef = useRef(null);
+  const citySuggestTimer = useRef(null);
+  const citySuggestWrapRef = useRef(null);
 
   const subscription = useSubscription(false);
 
@@ -119,6 +124,64 @@ export default function DiscoverPage({ user, setTab }) {
       cancelled = true;
     };
   }, []);
+
+  // Close city suggestions on outside click
+  useEffect(() => {
+    const onDoc = (e) => {
+      if (
+        citySuggestWrapRef.current &&
+        !citySuggestWrapRef.current.contains(e.target)
+      ) {
+        setShowCitySuggest(false);
+      }
+    };
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, []);
+
+  const fetchCitySuggestions = useCallback((query) => {
+    if (citySuggestTimer.current) clearTimeout(citySuggestTimer.current);
+    const q = (query || "").trim();
+    if (q.length < 2) {
+      setCitySuggestions([]);
+      setCitySuggestLoading(false);
+      setShowCitySuggest(false);
+      return;
+    }
+    setCitySuggestLoading(true);
+    citySuggestTimer.current = setTimeout(async () => {
+      try {
+        const data = await geoAPI.autocompleteCity(q);
+        const list = Array.isArray(data)
+          ? data
+          : Array.isArray(data?.results)
+            ? data.results
+            : [];
+        setCitySuggestions(list);
+        setShowCitySuggest(list.length > 0);
+      } catch {
+        setCitySuggestions([]);
+        setShowCitySuggest(false);
+      } finally {
+        setCitySuggestLoading(false);
+      }
+    }, 280);
+  }, []);
+
+  const pickCitySuggestion = (item) => {
+    const next = {
+      ...filters,
+      location_mode: "region",
+      city: item.city || "",
+      state: item.state || filters.state || "",
+      country: item.country || filters.country || "",
+      distance: 0,
+    };
+    setFilters(next);
+    setCitySuggestions([]);
+    setShowCitySuggest(false);
+    applyFilters(next);
+  };
 
   const loadFeed = useCallback(async (cur = 0, activeFilters = filters, append = false) => {
     if (cur === 0) setLoading(true);
@@ -394,36 +457,112 @@ export default function DiscoverPage({ user, setTab }) {
                 ))
               ) : (
                 <>
+                  <div ref={citySuggestWrapRef} style={styles.citySuggestWrap}>
+                    <input
+                      style={{ ...styles.regionInput, width: "100%", minWidth: 0 }}
+                      placeholder="Search city…"
+                      value={filters.city}
+                      autoComplete="off"
+                      onFocus={() => {
+                        if (citySuggestions.length > 0) setShowCitySuggest(true);
+                        else if ((filters.city || "").trim().length >= 2) {
+                          fetchCitySuggestions(filters.city);
+                        }
+                      }}
+                      onChange={(e) => {
+                        const city = e.target.value;
+                        setFilters({
+                          ...filters,
+                          location_mode: "region",
+                          city,
+                        });
+                        fetchCitySuggestions(city);
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          e.preventDefault();
+                          setShowCitySuggest(false);
+                          applyFilters({
+                            ...filters,
+                            location_mode: "region",
+                            distance: 0,
+                          });
+                        }
+                        if (e.key === "Escape") setShowCitySuggest(false);
+                      }}
+                    />
+                    {showCitySuggest && (
+                      <div style={styles.citySuggestDropdown} role="listbox">
+                        {citySuggestLoading && (
+                          <div style={styles.citySuggestItemMuted}>Searching…</div>
+                        )}
+                        {!citySuggestLoading &&
+                          citySuggestions.map((s, i) => (
+                            <button
+                              key={`${s.city}-${s.state || ""}-${i}`}
+                              type="button"
+                              style={styles.citySuggestItem}
+                              onMouseDown={(e) => e.preventDefault()}
+                              onClick={() => pickCitySuggestion(s)}
+                            >
+                              <span style={styles.citySuggestMain}>
+                                {s.city}
+                              </span>
+                              <span style={styles.citySuggestSub}>
+                                {[s.state, s.country].filter(Boolean).join(", ")}
+                                {s.profile_count
+                                  ? ` · ${s.profile_count} nearby`
+                                  : ""}
+                              </span>
+                            </button>
+                          ))}
+                        {!citySuggestLoading && citySuggestions.length === 0 && (
+                          <div style={styles.citySuggestItemMuted}>
+                            No cities match — type at least 2 letters
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
                   <input
                     style={styles.regionInput}
-                    placeholder="City"
-                    value={filters.city}
-                    onChange={(e) =>
-                      setFilters({ ...filters, city: e.target.value })
-                    }
-                  />
-                  <input
-                    style={styles.regionInput}
-                    placeholder="State"
+                    placeholder="State (optional)"
                     value={filters.state}
                     onChange={(e) =>
-                      setFilters({ ...filters, state: e.target.value })
+                      setFilters({
+                        ...filters,
+                        location_mode: "region",
+                        state: e.target.value,
+                      })
                     }
                   />
                   <input
                     style={styles.regionInput}
-                    placeholder="Country"
+                    placeholder="Country (optional)"
                     value={filters.country}
                     onChange={(e) =>
-                      setFilters({ ...filters, country: e.target.value })
+                      setFilters({
+                        ...filters,
+                        location_mode: "region",
+                        country: e.target.value,
+                      })
                     }
                   />
                   <button
                     style={styles.applyBtn}
-                    onClick={() => applyFilters(filters)}
+                    onClick={() =>
+                      applyFilters({
+                        ...filters,
+                        location_mode: "region",
+                        distance: 0,
+                      })
+                    }
                   >
                     Apply
                   </button>
+                  <div style={styles.cityHint}>
+                    First: people in this city · then nearby · then age flex
+                  </div>
                 </>
               )}
             </div>
@@ -601,6 +740,59 @@ const styles = {
     flexWrap: "wrap",
     gap: 10,
     alignItems: "center",
+  },
+  citySuggestWrap: {
+    position: "relative",
+    minWidth: 180,
+    flex: "1 1 180px",
+    maxWidth: 280,
+  },
+  citySuggestDropdown: {
+    position: "absolute",
+    top: "100%",
+    left: 0,
+    right: 0,
+    marginTop: 4,
+    background: "var(--dark-800)",
+    border: "0.5px solid var(--dark-500)",
+    borderRadius: 12,
+    boxShadow: "0 12px 32px rgba(0,0,0,0.45)",
+    zIndex: 40,
+    maxHeight: 240,
+    overflowY: "auto",
+  },
+  citySuggestItem: {
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "flex-start",
+    gap: 2,
+    width: "100%",
+    padding: "10px 12px",
+    border: "none",
+    background: "transparent",
+    color: "var(--white)",
+    cursor: "pointer",
+    textAlign: "left",
+    borderBottom: "0.5px solid var(--dark-700)",
+  },
+  citySuggestMain: {
+    fontSize: 13,
+    fontWeight: 600,
+  },
+  citySuggestSub: {
+    fontSize: 11,
+    color: "var(--dark-300)",
+  },
+  citySuggestItemMuted: {
+    padding: "10px 12px",
+    fontSize: 12,
+    color: "var(--dark-300)",
+  },
+  cityHint: {
+    width: "100%",
+    fontSize: 11,
+    color: "var(--dark-300)",
+    marginTop: 2,
   },
   filterLabel: {
     display: "flex",

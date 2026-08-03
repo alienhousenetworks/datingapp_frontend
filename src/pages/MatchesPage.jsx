@@ -6,6 +6,7 @@ import {
   interactionAPI,
   profileAPI,
 } from "../api";
+import ProfileDetail from "../components/ProfileDetail";
 import matchesStyles from "../styles/MatchesPage.module.css";
 import { getUserDisplayName, getUserInitial } from "../utils/userDisplay";
 
@@ -30,6 +31,8 @@ export default function MatchesPage({ onOpenChat }) {
   const [receivedLikes, setReceivedLikes] = useState([]);
   const [likesCount, setLikesCount] = useState(0);
   const [likesBlurred, setLikesBlurred] = useState(false);
+  const [canSeeIncomingLikes, setCanSeeIncomingLikes] = useState(false);
+  const [profilePreview, setProfilePreview] = useState(null);
 
   useEffect(() => {
     loadData();
@@ -78,17 +81,48 @@ export default function MatchesPage({ onOpenChat }) {
       );
 
       const count = likesData?.count ?? 0;
-      const userIds = likesData?.users || [];
+      const rawUsers = likesData?.users || [];
+      const canSee = likesData?.can_see_incoming_likes === true;
+      const canViewFull =
+        likesData?.can_view_full_profiles === true ||
+        rawUsers.some((u) => u && u.blurred === false);
+      setCanSeeIncomingLikes(canSee);
       setLikesCount(count);
-      setLikesBlurred(count > 0 && userIds.length === 0);
+      // Blur only when not permitted or server returned empty stubs (legacy)
+      setLikesBlurred(
+        canSee && count > 0 && (rawUsers.length === 0 || (!canViewFull && rawUsers.every((u) => u?.blurred)))
+      );
 
-      if (userIds.length > 0) {
+      if (canSee && rawUsers.length > 0) {
         const hydrated = await Promise.all(
-          userIds.slice(0, 20).map(async (userData) => {
-            const uid = typeof userData === "string" ? userData : userData?.id;
-            const profile = userData?.profile;
-            if (profile) {
-              return { id: uid, ...profile };
+          rawUsers.slice(0, 30).map(async (userData) => {
+            if (typeof userData === "string") {
+              try {
+                const p = await profileAPI.getProfile(userData);
+                return { id: userData, ...p, can_direct_message: p?.can_direct_message };
+              } catch {
+                return { id: userData };
+              }
+            }
+            const uid = userData?.id;
+            // Discovery payload: profile_card (preferred) or profile
+            const card =
+              userData?.profile_card ||
+              userData?.profile ||
+              null;
+            if (card && typeof card === "object") {
+              return {
+                id: uid || card.id,
+                ...card,
+                blurred: userData.blurred === true,
+                image_url:
+                  userData.image_url ||
+                  card.images?.[0]?.image_url ||
+                  card.avatar_detail?.image_url,
+              };
+            }
+            if (userData?.blurred) {
+              return { id: uid, blurred: true };
             }
             try {
               const p = await profileAPI.getProfile(uid);
@@ -98,7 +132,7 @@ export default function MatchesPage({ onOpenChat }) {
             }
           }),
         );
-        setReceivedLikes(hydrated);
+        setReceivedLikes(hydrated.filter((u) => u?.id));
       } else {
         setReceivedLikes([]);
       }
@@ -142,13 +176,31 @@ export default function MatchesPage({ onOpenChat }) {
       const res = await interactionAPI.like(senderId);
       if (res.status === "match") {
         alert("It's a Match! You can now start chatting.");
+        setProfilePreview(null);
         loadData();
       } else {
         alert("Liked back successfully!");
+        setProfilePreview(null);
         loadData();
       }
     } catch {
-      alert("Failed to relike user");
+      alert("Failed to like back");
+    }
+  };
+
+  const openIncomingProfile = async (sender) => {
+    if (!sender?.id || sender.blurred) return;
+    // Prefer already-hydrated card; refresh for full public profile fields
+    try {
+      const p = await profileAPI.getProfile(sender.id);
+      setProfilePreview({
+        id: sender.id,
+        ...sender,
+        ...p,
+        can_direct_message: p?.can_direct_message ?? sender.can_direct_message,
+      });
+    } catch {
+      setProfilePreview(sender);
     }
   };
 
@@ -204,7 +256,7 @@ export default function MatchesPage({ onOpenChat }) {
       {newMatches.length > 0 && <div style={styles.divider} />}
 
       {/* Incoming Requests */}
-      {likesBlurred && (
+      {likesBlurred && canSeeIncomingLikes && (
         <div style={styles.section} className={matchesStyles.section}>
           <div style={styles.sectionLabel}>People who liked you</div>
           <div style={styles.premiumBlurCard}>
@@ -213,13 +265,14 @@ export default function MatchesPage({ onOpenChat }) {
               {likesCount} {likesCount === 1 ? "person likes" : "people like"} you
             </p>
             <p style={styles.blurSub}>
-              Upgrade to premium to see who liked you and match instantly.
+              Your gender + sexuality combo is allowed to see likes, but profiles
+              could not be loaded. Pull to refresh.
             </p>
           </div>
         </div>
       )}
 
-      {likesBlurred && <div style={styles.divider} />}
+      {likesBlurred && canSeeIncomingLikes && <div style={styles.divider} />}
 
       {(confessionRequests.length > 0 || receivedLikes.length > 0) && (
         <div style={styles.section} className={matchesStyles.section}>
@@ -273,16 +326,37 @@ export default function MatchesPage({ onOpenChat }) {
                   Incoming Like ♥
                 </span>
               </div>
-              <p style={styles.reqText}>
-                <strong>{getUserDisplayName(sender)}</strong>
-                {sender.age ? `, ${sender.age}` : ""} liked your profile!
-              </p>
+              <div style={{ display: "flex", gap: 12, alignItems: "center", marginBottom: 8 }}>
+                {(sender.image_url || sender.images?.[0]?.image_url) && (
+                  <img
+                    src={sender.image_url || sender.images[0].image_url}
+                    alt=""
+                    style={{
+                      width: 48,
+                      height: 48,
+                      borderRadius: "50%",
+                      objectFit: "cover",
+                      border: "2px solid var(--pink)",
+                    }}
+                  />
+                )}
+                <p style={{ ...styles.reqText, margin: 0 }}>
+                  <strong>{getUserDisplayName(sender)}</strong>
+                  {sender.age ? `, ${sender.age}` : ""} liked your profile!
+                </p>
+              </div>
               <div style={styles.reqActions}>
                 <button
                   style={{ ...styles.reqBtn, ...styles.acceptReqBtn }}
                   onClick={() => handleRelike(sender.id)}
                 >
                   Like Back & Match
+                </button>
+                <button
+                  style={{ ...styles.reqBtn, ...styles.rejectReqBtn }}
+                  onClick={() => openIncomingProfile(sender)}
+                >
+                  View full profile
                 </button>
               </div>
             </div>
@@ -291,6 +365,18 @@ export default function MatchesPage({ onOpenChat }) {
       )}
 
       {(confessionRequests.length > 0 || receivedLikes.length > 0) && <div style={styles.divider} />}
+
+      {profilePreview && (
+        <ProfileDetail
+          profile={profilePreview}
+          onClose={() => setProfilePreview(null)}
+          onLike={() => {
+            // ProfileDetail already sent the like; refresh matches/likes
+            setProfilePreview(null);
+            loadData();
+          }}
+        />
+      )}
 
       {/* Conversations */}
       <div style={styles.section} className={matchesStyles.section}>

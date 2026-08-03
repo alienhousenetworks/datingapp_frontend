@@ -38,12 +38,17 @@ const carouselStyles = {
   }
 };
 
+/** Show Message only when backend feed flag says admin matrix allows it (no gender hardcoding). */
+const canMessageProfile = (profile) =>
+  profile?.can_direct_message === true || profile?.canDirectMessage === true;
+
 /** Mobile-only layout: vertical feed scroll + tap/swipe photos in hero strip only */
-const MobileFeedCard = ({ profile, handleLike, setFullScreenImage, themeStyles, liked }) => {
+const MobileFeedCard = ({ profile, handleLike, onMessage, setFullScreenImage, themeStyles, liked }) => {
   const bg = themeStyles.cardStyle.background;
   const images = profile.images || [];
   const [photoIdx, setPhotoIdx] = useState(0);
   const scrollRef = useRef(null);
+  const showMessage = canMessageProfile(profile) && typeof onMessage === "function";
 
   const goPhoto = (step) => {
     let next = photoIdx + step;
@@ -171,8 +176,24 @@ const MobileFeedCard = ({ profile, handleLike, setFullScreenImage, themeStyles, 
           )}
         </div>
 
-        {/* Pinned action: reserved space so long bios never cover the like button */}
-        <div className={feedCss.mobileActionCenter}>
+        {/* Pinned actions: Message (admin DM matrix) left of Like — same as Flutter feed hero */}
+        <div className={feedCss.mobileActionCenter} style={{ gap: 20 }}>
+          {showMessage && (
+            <button
+              type="button"
+              className={feedCss.mobileGlowingHeart}
+              onClick={onMessage}
+              aria-label="Send message"
+              style={{
+                width: 60,
+                height: 60,
+                background: "rgba(255,255,255,0.12)",
+                boxShadow: "0 0 16px rgba(255,255,255,0.15)",
+              }}
+            >
+              <span style={{ fontSize: 24 }} aria-hidden>💬</span>
+            </button>
+          )}
           <button 
             type="button" 
             className={feedCss.mobileGlowingHeart} 
@@ -193,8 +214,9 @@ const MobileFeedCard = ({ profile, handleLike, setFullScreenImage, themeStyles, 
   );
 };
 
-const PolaroidLayout = ({ profile, handleLike, setFullScreenImage, themeStyles, liked }) => {
+const PolaroidLayout = ({ profile, handleLike, onMessage, setFullScreenImage, themeStyles, liked }) => {
   const bg = themeStyles.cardStyle.background;
+  const showMessage = canMessageProfile(profile) && typeof onMessage === "function";
 
   const renderOverviewSection = () => {
     const moodLabel = getMoodLabel(profile);
@@ -317,7 +339,22 @@ const PolaroidLayout = ({ profile, handleLike, setFullScreenImage, themeStyles, 
         <div className={feedCss.slide} style={carouselStyles.slide}>{renderDetailsSection()}</div>
       </div>
       
-      <div className={feedCss.bottomAction} style={polaroidStyles.bottomAction}>
+      <div className={feedCss.bottomAction} style={{ ...polaroidStyles.bottomAction, display: "flex", gap: 16, justifyContent: "center" }}>
+        {showMessage && (
+          <button
+            type="button"
+            className={feedCss.likeBtn}
+            style={{
+              ...polaroidStyles.likeBtn,
+              background: "rgba(255,255,255,0.15)",
+              boxShadow: "0 0 16px rgba(255,255,255,0.2)",
+            }}
+            onClick={onMessage}
+            aria-label="Send message"
+          >
+            <span style={polaroidStyles.heartIcon}>💬</span>
+          </button>
+        )}
         <button 
           className={feedCss.likeBtn} 
           style={{
@@ -334,8 +371,9 @@ const PolaroidLayout = ({ profile, handleLike, setFullScreenImage, themeStyles, 
   );
 };
 
-const ElegantLayout = ({ profile, handleLike, setFullScreenImage, themeStyles, liked }) => {
+const ElegantLayout = ({ profile, handleLike, onMessage, setFullScreenImage, themeStyles, liked }) => {
   const bg = themeStyles.cardStyle.background;
+  const showMessage = canMessageProfile(profile) && typeof onMessage === "function";
 
   const renderOverviewSection = () => {
     const moodLabel = getMoodLabel(profile);
@@ -464,11 +502,27 @@ const ElegantLayout = ({ profile, handleLike, setFullScreenImage, themeStyles, l
         <div className={feedCss.slide} style={carouselStyles.slide}>{renderDetailsSection()}</div>
       </div>
       
-      <div className={feedCss.actionRow} style={elegantStyles.actionRow}>
+      <div className={feedCss.actionRow} style={{ ...elegantStyles.actionRow, display: "flex", gap: 12 }}>
+        {showMessage && (
+          <button
+            type="button"
+            className={feedCss.connectBtn}
+            style={{
+              ...elegantStyles.connectBtn,
+              flex: 1,
+              background: "rgba(255,255,255,0.12)",
+              border: "1px solid rgba(255,255,255,0.35)",
+            }}
+            onClick={onMessage}
+          >
+            💬 Message
+          </button>
+        )}
         <button 
           className={feedCss.connectBtn} 
           style={{
             ...elegantStyles.connectBtn,
+            flex: showMessage ? 1 : undefined,
             background: liked ? "#ff3040" : "#000"
           }} 
           onClick={handleLike}
@@ -480,9 +534,10 @@ const ElegantLayout = ({ profile, handleLike, setFullScreenImage, themeStyles, l
   );
 };
 
-const MinimalLayout = ({ profile, handleLike, setFullScreenImage, themeStyles, liked }) => {
+const MinimalLayout = ({ profile, handleLike, onMessage, setFullScreenImage, themeStyles, liked }) => {
   const bg = themeStyles.cardStyle.background;
   const moodLabel = getMoodLabel(profile);
+  const showMessage = canMessageProfile(profile) && typeof onMessage === "function";
 
   return (
     <div className={feedCss.card} style={{ ...styles.container, background: bg, display: "flex", flexDirection: "column", padding: 24, alignItems: "center", justifyContent: "center" }}>
@@ -507,26 +562,45 @@ const MinimalLayout = ({ profile, handleLike, setFullScreenImage, themeStyles, l
         {moodLabel && <span style={polaroidStyles.tag}>Mood: {moodLabel}</span>}
       </div>
 
-      <button 
-        style={{
-          width: 60, height: 60, borderRadius: "50%",
-          background: liked ? "rgba(255, 48, 64, 0.9)" : "transparent",
-          border: `2px solid ${liked ? "rgba(255, 48, 64, 0.9)" : "rgba(255,255,255,0.4)"}`,
-          color: "#fff", fontSize: 24, cursor: "pointer",
-          display: "flex", alignItems: "center", justifyContent: "center",
-          transition: "all 0.2s"
-        }}
-        onClick={handleLike}
-      >
-        {liked ? "❤️" : "♡"}
-      </button>
+      <div style={{ display: "flex", gap: 16, alignItems: "center" }}>
+        {showMessage && (
+          <button
+            type="button"
+            style={{
+              width: 56, height: 56, borderRadius: "50%",
+              background: "rgba(255,255,255,0.12)",
+              border: "2px solid rgba(255,255,255,0.4)",
+              color: "#fff", fontSize: 22, cursor: "pointer",
+              display: "flex", alignItems: "center", justifyContent: "center",
+            }}
+            onClick={onMessage}
+            aria-label="Send message"
+          >
+            💬
+          </button>
+        )}
+        <button 
+          style={{
+            width: 60, height: 60, borderRadius: "50%",
+            background: liked ? "rgba(255, 48, 64, 0.9)" : "transparent",
+            border: `2px solid ${liked ? "rgba(255, 48, 64, 0.9)" : "rgba(255,255,255,0.4)"}`,
+            color: "#fff", fontSize: 24, cursor: "pointer",
+            display: "flex", alignItems: "center", justifyContent: "center",
+            transition: "all 0.2s"
+          }}
+          onClick={handleLike}
+        >
+          {liked ? "❤️" : "♡"}
+        </button>
+      </div>
     </div>
   );
 };
 
-const GridGalleryLayout = ({ profile, handleLike, setFullScreenImage, themeStyles, liked }) => {
+const GridGalleryLayout = ({ profile, handleLike, onMessage, setFullScreenImage, themeStyles, liked }) => {
   const bg = themeStyles.cardStyle.background;
   const images = profile.images || [];
+  const showMessage = canMessageProfile(profile) && typeof onMessage === "function";
 
   return (
     <div className={feedCss.card} style={{ ...styles.container, background: bg, padding: 16, display: "flex", flexDirection: "column" }}>
@@ -552,24 +626,40 @@ const GridGalleryLayout = ({ profile, handleLike, setFullScreenImage, themeStyle
         </p>
       </div>
 
-      <button 
-        style={{
-          position: "absolute", bottom: 16, right: 16,
-          padding: "12px 24px", borderRadius: 24,
-          background: liked ? "#ff3040" : themeStyles.accent,
-          border: "none", color: "#fff", fontSize: 14, fontWeight: "bold", cursor: "pointer",
-          boxShadow: `0 4px 12px ${themeStyles.accent}66`
-        }}
-        onClick={handleLike}
-      >
-        {liked ? "Matched ❤️" : "Send Like"}
-      </button>
+      <div style={{ position: "absolute", bottom: 16, right: 16, display: "flex", gap: 10, zIndex: 10 }}>
+        {showMessage && (
+          <button
+            type="button"
+            style={{
+              padding: "12px 18px", borderRadius: 24,
+              background: "rgba(0,0,0,0.55)",
+              border: "1px solid rgba(255,255,255,0.35)",
+              color: "#fff", fontSize: 14, fontWeight: "bold", cursor: "pointer",
+            }}
+            onClick={onMessage}
+          >
+            💬 Message
+          </button>
+        )}
+        <button 
+          style={{
+            padding: "12px 24px", borderRadius: 24,
+            background: liked ? "#ff3040" : themeStyles.accent,
+            border: "none", color: "#fff", fontSize: 14, fontWeight: "bold", cursor: "pointer",
+            boxShadow: `0 4px 12px ${themeStyles.accent}66`
+          }}
+          onClick={handleLike}
+        >
+          {liked ? "Matched ❤️" : "Send Like"}
+        </button>
+      </div>
     </div>
   );
 };
 
-const ImmersiveLayout = ({ profile, handleLike, setFullScreenImage, themeStyles, liked }) => {
+const ImmersiveLayout = ({ profile, handleLike, onMessage, setFullScreenImage, themeStyles, liked }) => {
   const primaryImg = profile.images?.[0]?.image_url;
+  const showMessage = canMessageProfile(profile) && typeof onMessage === "function";
   
   return (
     <div className={feedCss.card} style={{ ...styles.container, background: "#000", position: "relative" }}>
@@ -594,19 +684,37 @@ const ImmersiveLayout = ({ profile, handleLike, setFullScreenImage, themeStyles,
         {profile.bio && <p style={{ fontSize: 15, lineHeight: 1.4, margin: "0 0 16px 0", display: "-webkit-box", WebkitLineClamp: 3, WebkitBoxOrient: "vertical", overflow: "hidden" }}>{profile.bio}</p>}
       </div>
 
-      <button 
-        style={{
-          position: "absolute", bottom: 24, right: 24,
-          width: 56, height: 56, borderRadius: "50%",
-          background: liked ? "#ff3040" : "#fff",
-          border: "none", color: liked ? "#fff" : "#000", fontSize: 24, cursor: "pointer",
-          display: "flex", alignItems: "center", justifyContent: "center",
-          boxShadow: "0 4px 12px rgba(0,0,0,0.3)", zIndex: 10, pointerEvents: "auto"
-        }}
-        onClick={handleLike}
-      >
-        {liked ? "❤️" : "♥"}
-      </button>
+      <div style={{ position: "absolute", bottom: 24, right: 24, display: "flex", gap: 12, zIndex: 10, pointerEvents: "auto" }}>
+        {showMessage && (
+          <button
+            type="button"
+            style={{
+              width: 56, height: 56, borderRadius: "50%",
+              background: "rgba(0,0,0,0.55)",
+              border: "1px solid rgba(255,255,255,0.4)",
+              color: "#fff", fontSize: 22, cursor: "pointer",
+              display: "flex", alignItems: "center", justifyContent: "center",
+              boxShadow: "0 4px 12px rgba(0,0,0,0.3)",
+            }}
+            onClick={onMessage}
+            aria-label="Send message"
+          >
+            💬
+          </button>
+        )}
+        <button 
+          style={{
+            width: 56, height: 56, borderRadius: "50%",
+            background: liked ? "#ff3040" : "#fff",
+            border: "none", color: liked ? "#fff" : "#000", fontSize: 24, cursor: "pointer",
+            display: "flex", alignItems: "center", justifyContent: "center",
+            boxShadow: "0 4px 12px rgba(0,0,0,0.3)",
+          }}
+          onClick={handleLike}
+        >
+          {liked ? "❤️" : "♥"}
+        </button>
+      </div>
     </div>
   );
 };
@@ -697,6 +805,11 @@ export default function FeedProfileItem({ profile, onLike, isPreview = false }) 
     }
   };
 
+  const openMessageModal = () => {
+    if (!canMessageProfile(profile)) return;
+    setShowDirectRequestModal(true);
+  };
+
   const handleSubmitReport = async () => {
     if (isPreview) {
       setShowReportModal(false);
@@ -725,56 +838,29 @@ export default function FeedProfileItem({ profile, onLike, isPreview = false }) 
     }
   };
 
+  const layoutProps = {
+    profile,
+    handleLike,
+    onMessage: openMessageModal,
+    setFullScreenImage,
+    themeStyles,
+    liked,
+  };
+
   return (
     <>
       {isMobileFeed && !isPreview ? (
-        <MobileFeedCard
-          profile={profile}
-          handleLike={handleLike}
-          setFullScreenImage={setFullScreenImage}
-          themeStyles={themeStyles}
-          liked={liked}
-        />
+        <MobileFeedCard {...layoutProps} />
       ) : layoutType === "minimal" ? (
-        <MinimalLayout 
-          profile={profile} 
-          handleLike={handleLike} 
-          setFullScreenImage={setFullScreenImage} 
-          themeStyles={themeStyles} 
-          liked={liked}
-        />
+        <MinimalLayout {...layoutProps} />
       ) : layoutType === "grid" ? (
-        <GridGalleryLayout 
-          profile={profile} 
-          handleLike={handleLike} 
-          setFullScreenImage={setFullScreenImage} 
-          themeStyles={themeStyles} 
-          liked={liked}
-        />
+        <GridGalleryLayout {...layoutProps} />
       ) : layoutType === "immersive" ? (
-        <ImmersiveLayout 
-          profile={profile} 
-          handleLike={handleLike} 
-          setFullScreenImage={setFullScreenImage} 
-          themeStyles={themeStyles} 
-          liked={liked}
-        />
+        <ImmersiveLayout {...layoutProps} />
       ) : layoutType === "elegant" ? (
-        <ElegantLayout 
-          profile={profile} 
-          handleLike={handleLike} 
-          setFullScreenImage={setFullScreenImage} 
-          themeStyles={themeStyles} 
-          liked={liked}
-        />
+        <ElegantLayout {...layoutProps} />
       ) : (
-        <PolaroidLayout 
-          profile={profile} 
-          handleLike={handleLike} 
-          setFullScreenImage={setFullScreenImage} 
-          themeStyles={themeStyles} 
-          liked={liked}
-        />
+        <PolaroidLayout {...layoutProps} />
       )}
 
       {fullScreenImage && (

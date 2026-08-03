@@ -141,7 +141,7 @@ export default function ChatWindow({ conversation, onDeleteConversation, onConve
   const [previewUrl, setPreviewUrl] = useState(null);
   const [mediaType, setMediaType] = useState("");
 
-  // Viewer watermark identity (username preferred, else user id)
+  // Viewer watermark identity — prefer full viewer id (anti-leak)
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -152,7 +152,12 @@ export default function ChatWindow({ conversation, onDeleteConversation, onConve
         const uname =
           profile?.username || me?.username || me?.user?.username || "";
         const id = me?.id || me?.user_id || me?.user?.id || "";
-        setViewerStamp(uname ? `@${String(uname).replace(/^@/, "")}` : String(id).slice(0, 12));
+        const cleanName = uname ? String(uname).replace(/^@/, "") : "";
+        // Stamp viewer id (primary) + optional username
+        if (id && cleanName) setViewerStamp(`${cleanName} · ${id}`);
+        else if (id) setViewerStamp(String(id));
+        else if (cleanName) setViewerStamp(`@${cleanName}`);
+        else setViewerStamp("viewer");
       } catch {
         /* ignore */
       }
@@ -199,6 +204,8 @@ export default function ChatWindow({ conversation, onDeleteConversation, onConve
     setMediaCountdown(null);
     // Sender never marks own media as deleted / seen
     if (!msg || msg.from === "mine") return;
+    // Vanish immediately from the thread (one-time view)
+    setMessages((prev) => prev.filter((m) => String(m.id) !== String(msg.id)));
     try {
       await chatAPI.markSeen(msg.id);
     } catch (err) {
@@ -209,18 +216,6 @@ export default function ChatWindow({ conversation, onDeleteConversation, onConve
         }`,
       );
     }
-    setMessages((prev) =>
-      prev.map((m) =>
-        m.id === msg.id
-          ? {
-              ...m,
-              is_seen: true,
-              is_deleted: true,
-              text: "[Media Deleted]",
-            }
-          : m
-      )
-    );
   };
 
   const openPeerProfile = async () => {
@@ -281,14 +276,14 @@ export default function ChatWindow({ conversation, onDeleteConversation, onConve
       (m.is_deleted || m.text === "[Media Deleted]" || m.text === "[Message Expired]");
     
     if (m.type === "view_once" || m.type === "image") {
-      if (isOpenedForReceiver) {
+      if (isOpenedForReceiver || m.is_deleted) {
         return (
           <div style={styles.mediaPlaceholderOpened}>
-            <span>🔒 Opened Image</span>
+            <span>🔒 Photo opened</span>
           </div>
         );
       }
-      // Covered photo icon — tap opens fullscreen with viewer watermark
+      // Icon only — no thumbnail (one-time photo)
       return (
         <button
           onClick={() => {
@@ -302,26 +297,31 @@ export default function ChatWindow({ conversation, onDeleteConversation, onConve
             }
             setActiveMediaMessage(m);
           }}
-          style={styles.mediaCoverBtn}
-          title={m.from === "mine" ? "Your photo — tap to preview" : "Tap to view"}
+          style={styles.mediaIconBtn}
+          title={m.from === "mine" ? "Your photo — one-time" : "Tap once to view photo"}
         >
-          <span style={styles.mediaCoverIcon}>📷</span>
-          <span style={styles.mediaCoverLabel}>
-            {m.pending
-              ? "Uploading…"
-              : m.from === "mine"
-                ? "Photo · tap to view"
-                : "Tap to view photo"}
+          <span style={styles.mediaIconCircle} aria-hidden>
+            🖼️
+          </span>
+          <span style={styles.mediaIconMeta}>
+            <span style={styles.mediaIconTitle}>Photo</span>
+            <span style={styles.mediaIconSub}>
+              {m.pending
+                ? "Uploading…"
+                : m.from === "mine"
+                  ? "Tap to preview · one-time"
+                  : "Tap once to view"}
+            </span>
           </span>
         </button>
       );
     }
     
     if (m.type === "view_once_video" || m.type === "video") {
-      if (isOpenedForReceiver) {
+      if (isOpenedForReceiver || m.is_deleted) {
         return (
           <div style={styles.mediaPlaceholderOpened}>
-            <span>🔒 Opened Video</span>
+            <span>🔒 Video opened</span>
           </div>
         );
       }
@@ -338,16 +338,21 @@ export default function ChatWindow({ conversation, onDeleteConversation, onConve
             }
             setActiveMediaMessage(m);
           }}
-          style={styles.mediaCoverBtn}
-          title={m.from === "mine" ? "Your video — tap to preview" : "Tap to play"}
+          style={styles.mediaIconBtn}
+          title={m.from === "mine" ? "Your video — one-time" : "Tap once to play video"}
         >
-          <span style={styles.mediaCoverIcon}>🎥</span>
-          <span style={styles.mediaCoverLabel}>
-            {m.pending
-              ? "Uploading…"
-              : m.from === "mine"
-                ? "Video · tap to view"
-                : "Tap to play video"}
+          <span style={{ ...styles.mediaIconCircle, ...styles.mediaIconCircleVideo }} aria-hidden>
+            🎬
+          </span>
+          <span style={styles.mediaIconMeta}>
+            <span style={styles.mediaIconTitle}>Video</span>
+            <span style={styles.mediaIconSub}>
+              {m.pending
+                ? "Uploading…"
+                : m.from === "mine"
+                  ? "Tap to preview · one-time"
+                  : "Tap once to view"}
+            </span>
           </span>
         </button>
       );
@@ -692,33 +697,40 @@ export default function ChatWindow({ conversation, onDeleteConversation, onConve
               }),
             );
           } else if (data.type === "message_update") {
-            setMessages((prev) =>
-              prev.map((m) =>
-                String(m.id) === String(data.message_id)
-                  ? {
-                      ...m,
-                      is_seen:
-                        data.is_seen !== undefined ? data.is_seen : m.is_seen,
-                      delivered_at:
-                        data.delivered_at !== undefined
-                          ? data.delivered_at
-                          : m.delivered_at,
-                      is_deleted:
-                        data.is_deleted !== undefined
-                          ? data.is_deleted
-                          : m.is_deleted,
-                      text:
-                        data.content?.text !== undefined
-                          ? data.content.text
-                          : m.text,
-                      url:
-                        data.content?.url !== undefined
-                          ? getAbsoluteMediaUrl(data.content.url)
-                          : m.url,
-                    }
-                  : m,
-              ),
-            );
+            // One-time media deleted after receiver open → remove bubble for both sides
+            if (data.is_deleted === true) {
+              setMessages((prev) =>
+                prev.filter((m) => String(m.id) !== String(data.message_id)),
+              );
+            } else {
+              setMessages((prev) =>
+                prev.map((m) =>
+                  String(m.id) === String(data.message_id)
+                    ? {
+                        ...m,
+                        is_seen:
+                          data.is_seen !== undefined ? data.is_seen : m.is_seen,
+                        delivered_at:
+                          data.delivered_at !== undefined
+                            ? data.delivered_at
+                            : m.delivered_at,
+                        is_deleted:
+                          data.is_deleted !== undefined
+                            ? data.is_deleted
+                            : m.is_deleted,
+                        text:
+                          data.content?.text !== undefined
+                            ? data.content.text
+                            : m.text,
+                        url:
+                          data.content?.url !== undefined
+                            ? getAbsoluteMediaUrl(data.content.url)
+                            : m.url,
+                      }
+                    : m,
+                ),
+              );
+            }
           }
           if (data.type === "typing") {
             setTyping(data.status === "start" && !data.is_me);
@@ -1982,6 +1994,53 @@ const styles = {
     fontSize: 12,
     fontWeight: 600,
     opacity: 0.9,
+  },
+  /** Icon-only photo/video bubble (no thumbnail). */
+  mediaIconBtn: {
+    display: "flex",
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    minWidth: 148,
+    padding: "8px 12px",
+    borderRadius: 14,
+    border: "1px solid rgba(255,255,255,0.22)",
+    background: "rgba(0,0,0,0.22)",
+    color: "#fff",
+    cursor: "pointer",
+    textAlign: "left",
+  },
+  mediaIconCircle: {
+    width: 40,
+    height: 40,
+    borderRadius: "50%",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    fontSize: 20,
+    lineHeight: 1,
+    background: "rgba(0,0,0,0.35)",
+    border: "1.2px solid rgba(255,255,255,0.55)",
+    flexShrink: 0,
+  },
+  mediaIconCircleVideo: {
+    background: "rgba(255,31,107,0.25)",
+  },
+  mediaIconMeta: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 2,
+    minWidth: 0,
+  },
+  mediaIconTitle: {
+    fontSize: 14,
+    fontWeight: 700,
+    lineHeight: 1.2,
+  },
+  mediaIconSub: {
+    fontSize: 11,
+    opacity: 0.85,
+    lineHeight: 1.2,
   },
   mediaViewBtn: {
     background: "rgba(255, 31, 107, 0.12)",

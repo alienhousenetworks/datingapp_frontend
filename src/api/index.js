@@ -13,6 +13,12 @@ export const BASE_URL =
   (typeof import.meta !== "undefined" && import.meta.env ? import.meta.env.VITE_API_V1_URL : null) ||
   "https://testapi.spycenow.com/api/v1";
 
+/** FastAPI discovery feed base (GET /api/v2/feed). */
+export const API_V2_URL =
+  (typeof process !== "undefined" && process.env ? process.env.REACT_APP_API_V2_URL : null) ||
+  (typeof import.meta !== "undefined" && import.meta.env ? import.meta.env.VITE_API_V2_URL : null) ||
+  `${API_BASE_URL}/api/v2`;
+
 export const APP_VERSION =
   (typeof process !== "undefined" && process.env ? process.env.REACT_APP_VERSION : null) ||
   (typeof import.meta !== "undefined" && import.meta.env ? import.meta.env.VITE_APP_VERSION : null) ||
@@ -140,7 +146,10 @@ export const getValidAccessToken = async () => {
 
 // ─── Core fetch wrapper (handles 401 → auto-refresh) ─────────
 async function apiFetch(path, options = {}) {
-  const url = `${BASE_URL}${path}`;
+  // Absolute URL (e.g. feed v2) or path under /api/v1
+  const url = path.startsWith("http://") || path.startsWith("https://")
+    ? path
+    : `${BASE_URL}${path}`;
   const validToken = await getValidAccessToken();
   const headers = {
     "Content-Type": "application/json",
@@ -427,6 +436,7 @@ export const imageAPI = {
 // FEED (Discovery)
 // ============================================================
 export const feedAPI = {
+  /** Discover feed — FastAPI only (GET /api/v2/feed). */
   getFeed: async (count = 20, cursor = 0, filters = {}) => {
     const params = new URLSearchParams({ count: String(count), cursor: String(cursor) });
     if (filters.min_age != null) params.set("min_age", String(filters.min_age));
@@ -445,6 +455,10 @@ export const feedAPI = {
       if (city) params.set("city", city);
       if (state) params.set("state", state);
       if (country) params.set("country", country);
+      const clat = filters.city_lat ?? filters.lat;
+      const clon = filters.city_lon ?? filters.lon ?? filters.lng;
+      if (clat != null && String(clat).length) params.set("city_lat", String(clat));
+      if (clon != null && String(clon).length) params.set("city_lon", String(clon));
     } else {
       params.set("location_mode", "distance");
       if (filters.distance != null && filters.distance !== "") {
@@ -452,8 +466,9 @@ export const feedAPI = {
       }
     }
     if (filters.currently_online) params.set("currently_online", "true");
+    if (filters.include_liked) params.set("include_liked", "true");
     (filters.gender || []).forEach((g) => params.append("gender", String(g)));
-    const res = await apiFetch(`/feed/?${params.toString()}`);
+    const res = await apiFetch(`${API_V2_URL}/feed?${params.toString()}`);
     return res.json();
   },
 };
@@ -844,6 +859,21 @@ export const verificationAPI = {
   mockComplete: async () => {
     const res = await apiFetch("/verification/mock-complete/", {
       method: "POST",
+    });
+    return res.json();
+  },
+
+  /** Real AWS mode: create Face Liveness session (backend only). */
+  startSession: async () => {
+    const res = await apiFetch("/verification/start/", { method: "POST" });
+    return res.json();
+  },
+
+  /** Real AWS mode: after client liveness UI finishes. */
+  completeSession: async (sessionId) => {
+    const res = await apiFetch("/verification/complete/", {
+      method: "POST",
+      body: JSON.stringify({ session_id: sessionId }),
     });
     return res.json();
   },

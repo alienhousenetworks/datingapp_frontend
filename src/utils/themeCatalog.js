@@ -15,6 +15,8 @@ export const BACKGROUND_PATTERNS = {
   B05: "radial-gradient(circle at top right, #334155, #0f172a)",
   B06: "repeating-linear-gradient(45deg, #000 0, #000 10px, #111 10px, #111 20px)",
   B07: "linear-gradient(to bottom, #fdf4ff, #fae8ff)",
+  // B12 Spyder Splash — diamond lattice (matches Flutter SpyderSpyce default)
+  B12: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 375 812'%3E%3Crect width='375' height='812' fill='%233FAC42'/%3E%3Cpath fill='%230E877E' d='M187 0l80 120-80 120-80-120z'/%3E%3C/svg%3E")`,
 };
 
 const VARIANT_ACCENTS = {

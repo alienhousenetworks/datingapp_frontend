@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { optionsAPI, profileAPI, verificationAPI } from "../api";
+import LanguagePicker from "../components/LanguagePicker";
 import useSubscription from "../hooks/useSubscription";
 import { isValidUsername, normalizeUsername } from "../utils/userDisplay";
 import {
@@ -8,7 +9,8 @@ import {
 } from "../utils/onboarding";
 
 const MIN_BIO = 20;
-const TOTAL_STEPS = 5; // 1 basics · 2 identity · 3 bio · 4 face · 5 welcome
+// 1 basics · 2 identity · 3 languages · 4 bio · 5 face · 6 welcome
+const TOTAL_STEPS = 6;
 
 function idOf(value) {
   if (value == null || value === "") return "";
@@ -23,14 +25,19 @@ export default function OnboardingPage({ onComplete }) {
   const [gender, setGender] = useState("");
   const [preferredGenders, setPreferredGenders] = useState([]);
   const [sexuality, setSexuality] = useState("");
+  const [languages, setLanguages] = useState([]);
   const [bio, setBio] = useState("");
   const [faceVerified, setFaceVerified] = useState(false);
   const [verifying, setVerifying] = useState(false);
+  /** From GET /verification/status/ — FACE_VERIFICATION server flag */
+  const [faceVerificationEnabled, setFaceVerificationEnabled] = useState(false);
+  const [mockMode, setMockMode] = useState(true);
   /** Existing username on this account — availability check must allow it */
   const [existingUsername, setExistingUsername] = useState("");
 
   const [genderOpts, setGenderOpts] = useState([]);
   const [sexualityOpts, setSexualityOpts] = useState([]);
+  const [languageOpts, setLanguageOpts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
@@ -41,44 +48,64 @@ export default function OnboardingPage({ onComplete }) {
     let cancelled = false;
     const bootstrap = async () => {
       try {
-        const [genders, sexualities, profile] = await Promise.all([
-          optionsAPI.getGenders().catch(() => []),
-          optionsAPI.getSexualities().catch(() => []),
-          profileAPI.getMyProfile().catch(() => null),
-        ]);
+        const [genders, sexualities, langs, profile, faceStatus] =
+          await Promise.all([
+            optionsAPI.getGenders().catch(() => []),
+            optionsAPI.getSexualities().catch(() => []),
+            optionsAPI.getLanguages().catch(() => []),
+            profileAPI.getMyProfile().catch(() => null),
+            verificationAPI.getStatus().catch(() => null),
+          ]);
         if (cancelled) return;
 
         setGenderOpts(Array.isArray(genders) ? genders : []);
         setSexualityOpts(Array.isArray(sexualities) ? sexualities : []);
+        setLanguageOpts(Array.isArray(langs) ? langs : []);
 
-        // Already finished signup → leave onboarding immediately
+        if (faceStatus && !faceStatus.error) {
+          setFaceVerificationEnabled(!!faceStatus.face_verification);
+          setMockMode(
+            faceStatus.mock_mode !== false && !faceStatus.face_verification
+          );
+          if (faceStatus.verified) setFaceVerified(true);
+        }
+
         if (profile && isProfileOnboarded(profile)) {
           setOnboardingLocalFlag(profile.id || profile.user_id);
           onComplete?.();
           return;
         }
 
-        // Prefill whatever exists so returning users aren't blank forms
         if (profile && !profile.error) {
           const uname = (profile.username || "").toString().trim();
           if (uname) {
             setUsername(uname);
             setExistingUsername(normalizeUsername(uname));
           }
-          if (profile.date_of_birth) setDob(String(profile.date_of_birth).slice(0, 10));
+          if (profile.date_of_birth)
+            setDob(String(profile.date_of_birth).slice(0, 10));
           const g = idOf(profile.gender ?? profile.gender_detail);
           if (g) setGender(g);
           const s = idOf(profile.sexuality ?? profile.sexuality_detail);
           if (s) setSexuality(s);
-          const prefs = profile.preferred_genders || profile.preferred_genders_detail || [];
+          const prefs =
+            profile.preferred_genders || profile.preferred_genders_detail || [];
           if (Array.isArray(prefs) && prefs.length) {
             setPreferredGenders(prefs.map(idOf).filter(Boolean));
+          }
+          if (Array.isArray(profile.languages) && profile.languages.length) {
+            setLanguages(
+              profile.languages.map((l) =>
+                typeof l === "object" ? l.name || String(l) : String(l)
+              )
+            );
           }
           if (profile.bio) setBio(String(profile.bio));
         }
       } catch {
         setGenderOpts([]);
         setSexualityOpts([]);
+        setLanguageOpts([]);
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -87,7 +114,6 @@ export default function OnboardingPage({ onComplete }) {
     return () => {
       cancelled = true;
     };
-    // Run once on mount — parent onComplete identity changes every render
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -130,7 +156,6 @@ export default function OnboardingPage({ onComplete }) {
         setError("You must be at least 18 years old to use SPYCE.");
         return;
       }
-      // Allow keeping your own existing username (returning users in onboarding)
       if (normalized !== existingUsername) {
         try {
           const check = await profileAPI.checkUsernameAvailable(normalized);
@@ -139,7 +164,9 @@ export default function OnboardingPage({ onComplete }) {
             return;
           }
         } catch (err) {
-          setError(err.message || "Could not verify username. Please try again.");
+          setError(
+            err.message || "Could not verify username. Please try again."
+          );
           return;
         }
       }
@@ -167,6 +194,19 @@ export default function OnboardingPage({ onComplete }) {
     }
 
     if (step === 3) {
+      if (!languageOpts.length) {
+        setError(
+          "Language options failed to load. Reconnect and try again — cannot skip."
+        );
+        return;
+      }
+      if (languages.length === 0) {
+        setError("Select at least one language you speak.");
+        return;
+      }
+    }
+
+    if (step === 4) {
       const b = bio.trim();
       if (!b) {
         setError("Bio is required. Cannot skip.");
@@ -180,7 +220,7 @@ export default function OnboardingPage({ onComplete }) {
       }
     }
 
-    if (step === 4) {
+    if (step === 5) {
       if (!faceVerified) {
         setError("Complete face verification to continue. Cannot skip.");
         return;
@@ -203,28 +243,40 @@ export default function OnboardingPage({ onComplete }) {
     );
   };
 
-  const handleMockFaceVerify = async () => {
+  const useRealFace = faceVerificationEnabled && !mockMode;
+
+  const handleFaceVerify = async () => {
     if (verifying || faceVerified) return;
     setVerifying(true);
     setError("");
     try {
+      if (useRealFace) {
+        // Full Amplify Face Liveness UI lives on the Flutter app.
+        // Web stays on mock until @aws-amplify/ui-react-liveness is wired;
+        // when FACE_VERIFICATION=true without Amplify UI, guide user to mobile.
+        setError(
+          "Real face liveness runs in the SPYCE mobile app (AWS Rekognition). " +
+            "Complete verification there, or set FACE_VERIFICATION=False for web mock."
+        );
+        return;
+      }
       const res = await verificationAPI.mockComplete();
       if (
         res?.status === "SUCCESS" ||
         res?.is_identity_verified === true ||
-        res?.is_identity_verified === "true"
+        res?.is_identity_verified === "true" ||
+        res?.verified === true
       ) {
         setFaceVerified(true);
       } else if (res?.error) {
         setError(res.error);
       } else {
-        // Still mark UI verified if API returns soft success-like payload
         setFaceVerified(true);
       }
     } catch (err) {
       setError(
         err?.message ||
-          "Mock verification failed. Ensure ALLOW_MOCK_VERIFICATION is enabled."
+          "Verification failed. If mock is disabled, set FACE_VERIFICATION=False or use the mobile app."
       );
     } finally {
       setVerifying(false);
@@ -246,12 +298,13 @@ export default function OnboardingPage({ onComplete }) {
         gender,
         preferred_genders: preferredGenders,
         sexuality,
+        languages,
         bio: bio.trim(),
       };
 
       const res = await profileAPI.updateMyProfile(payload);
       if (res && !res.error) {
-        setStep(5);
+        setStep(6);
       } else {
         const usernameError = res?.username?.[0];
         setError(
@@ -267,8 +320,7 @@ export default function OnboardingPage({ onComplete }) {
         setSubmitting(false);
         return;
       }
-      // Demo fallback only after local mandatory fields + face
-      setStep(5);
+      setStep(6);
     } finally {
       setSubmitting(false);
     }
@@ -287,28 +339,71 @@ export default function OnboardingPage({ onComplete }) {
     }
   };
 
+  const stepMeta = {
+    1: {
+      title: "Let's start with the basics",
+      subtitle: "Username and age are required — this step cannot be skipped.",
+    },
+    2: {
+      title: "Who are you?",
+      subtitle: "Gender, sexuality, and preferred genders are all required.",
+    },
+    3: {
+      title: "Languages you speak",
+      subtitle:
+        "Pick a few popular ones — or search if yours isn't listed below.",
+    },
+    4: {
+      title: "Write your bio",
+      subtitle: `Required — at least ${MIN_BIO} characters. Cannot skip.`,
+    },
+    5: {
+      title: "Face verification",
+      subtitle: "Live face check is required to finish signup — no skip.",
+    },
+    6: {
+      title: "Welcome to SPYCE ✨",
+      subtitle: `You have ${subscription.trialDaysRemaining} days of free trial remaining. After that, you'll need to subscribe to keep using the app.`,
+    },
+  };
+
   if (loading) {
     return (
       <div style={styles.page}>
-        <div style={styles.glow} />
-        <p style={{ color: "var(--dark-300)" }}>Setting up your vibe...</p>
+        <div style={styles.bgMesh} />
+        <div style={styles.orbA} />
+        <p style={{ color: "var(--dark-200)", zIndex: 2 }}>
+          Setting up your vibe...
+        </p>
       </div>
     );
   }
 
+  const meta = stepMeta[step] || stepMeta[1];
+
   return (
     <div style={styles.page}>
-      <div style={styles.glow} />
-      <div style={styles.glow2} />
+      <div style={styles.bgBase} />
+      <div style={styles.bgMesh} />
+      <div style={styles.orbA} />
+      <div style={styles.orbB} />
+      <div style={styles.gridOverlay} />
 
       <div style={styles.container}>
-        <div style={styles.progressBar}>
-          <div
-            style={{
-              ...styles.progressFill,
-              width: `${(step / TOTAL_STEPS) * 100}%`,
-            }}
-          />
+        {/* Segmented progress */}
+        <div style={styles.progressRow}>
+          {Array.from({ length: TOTAL_STEPS }, (_, i) => (
+            <div
+              key={i}
+              style={{
+                ...styles.progressSeg,
+                background:
+                  i < step
+                    ? "linear-gradient(90deg, var(--pink), #c026d3)"
+                    : "rgba(255,255,255,0.08)",
+              }}
+            />
+          ))}
         </div>
 
         <div style={styles.card}>
@@ -316,33 +411,34 @@ export default function OnboardingPage({ onComplete }) {
             <div style={styles.logo}>
               sp<span style={{ color: "var(--pink)" }}>y</span>ce
             </div>
-            <span style={styles.stepIndicator}>
-              Step {step} of {TOTAL_STEPS} · required
+            <span style={styles.stepBadge}>
+              {step} / {TOTAL_STEPS}
             </span>
           </div>
 
           {error && <div style={styles.errorBox}>{error}</div>}
 
+          <h2 style={styles.title}>{meta.title}</h2>
+          <p style={styles.subtitle}>{meta.subtitle}</p>
+
           {step === 1 && (
             <div>
-              <h2 style={styles.title}>Let's start with the basics</h2>
-              <p style={styles.subtitle}>
-                Username and age are required — this step cannot be skipped.
-              </p>
-
               <div style={styles.field}>
                 <label style={styles.label}>Username *</label>
-                <input
-                  type="text"
-                  placeholder="your_username"
-                  style={styles.input}
-                  value={username}
-                  onChange={(e) =>
-                    setUsername(e.target.value.replace(/\s/g, ""))
-                  }
-                  autoFocus
-                  autoComplete="username"
-                />
+                <div style={styles.inputShell}>
+                  <span style={styles.prefix}>@</span>
+                  <input
+                    type="text"
+                    placeholder="your_username"
+                    style={styles.inputBare}
+                    value={username}
+                    onChange={(e) =>
+                      setUsername(e.target.value.replace(/\s/g, ""))
+                    }
+                    autoFocus
+                    autoComplete="username"
+                  />
+                </div>
                 <p style={styles.note}>
                   Letters, numbers, underscores, and periods only.
                 </p>
@@ -368,11 +464,6 @@ export default function OnboardingPage({ onComplete }) {
 
           {step === 2 && (
             <div>
-              <h2 style={styles.title}>Who are you?</h2>
-              <p style={styles.subtitle}>
-                Gender, sexuality, and preferred genders are all required.
-              </p>
-
               <div style={styles.field}>
                 <label style={styles.label}>I identify as *</label>
                 <div style={styles.chipRow}>
@@ -442,48 +533,53 @@ export default function OnboardingPage({ onComplete }) {
           )}
 
           {step === 3 && (
-            <div>
-              <h2 style={styles.title}>Write your bio</h2>
-              <p style={styles.subtitle}>
-                Required — at least {MIN_BIO} characters. Cannot skip.
-              </p>
-              <div style={styles.field}>
-                <label style={styles.label}>Bio *</label>
-                <textarea
-                  style={{
-                    ...styles.input,
-                    minHeight: 120,
-                    resize: "vertical",
-                    fontFamily: "inherit",
-                  }}
-                  maxLength={300}
-                  placeholder="Tell people who you are and what you're looking for…"
-                  value={bio}
-                  onChange={(e) => setBio(e.target.value)}
-                />
-                <p
-                  style={{
-                    ...styles.note,
-                    color:
-                      bio.trim().length >= MIN_BIO
-                        ? "var(--teal, #5eead4)"
-                        : "var(--dark-400)",
-                  }}
-                >
-                  {bio.trim().length} / 300 · min {MIN_BIO}
-                </p>
-              </div>
-            </div>
+            <LanguagePicker
+              options={languageOpts}
+              value={languages}
+              onChange={setLanguages}
+            />
           )}
 
           {step === 4 && (
-            <div>
-              <h2 style={styles.title}>Face verification</h2>
-              <p style={styles.subtitle}>
-                Live face check is required to finish signup — no skip.
+            <div style={styles.field}>
+              <label style={styles.label}>Bio *</label>
+              <textarea
+                style={{
+                  ...styles.input,
+                  minHeight: 140,
+                  resize: "vertical",
+                  fontFamily: "inherit",
+                  lineHeight: 1.5,
+                }}
+                maxLength={300}
+                placeholder="Tell people who you are and what you're looking for…"
+                value={bio}
+                onChange={(e) => setBio(e.target.value)}
+              />
+              <p
+                style={{
+                  ...styles.note,
+                  color:
+                    bio.trim().length >= MIN_BIO
+                      ? "var(--teal, #5eead4)"
+                      : "var(--dark-400)",
+                }}
+              >
+                {bio.trim().length} / 300 · min {MIN_BIO}
               </p>
+            </div>
+          )}
 
-              <div style={styles.verifyBox}>
+          {step === 5 && (
+            <div>
+              <div
+                style={{
+                  ...styles.verifyBox,
+                  borderColor: faceVerified
+                    ? "rgba(52, 211, 153, 0.45)"
+                    : "rgba(255,31,107,0.2)",
+                }}
+              >
                 <div style={styles.verifyIcon}>
                   {faceVerified ? "✅" : "🤳"}
                 </div>
@@ -493,7 +589,9 @@ export default function OnboardingPage({ onComplete }) {
                 <p style={styles.verifyText}>
                   {faceVerified
                     ? "Identity check passed. Continue to enter SPYCE."
-                    : "Hold your face in frame for a short liveness check. Currently using a mock bypass — real camera liveness will replace this."}
+                    : useRealFace
+                      ? "Live camera check via Amazon Rekognition. Use the SPYCE mobile app for the full liveness flow."
+                      : "Hold your face in frame for a short liveness check. Dev mock mode is on (FACE_VERIFICATION=False)."}
                 </p>
               </div>
 
@@ -502,12 +600,14 @@ export default function OnboardingPage({ onComplete }) {
                   <button
                     type="button"
                     style={{ ...styles.actionBtn, background: "var(--pink)" }}
-                    onClick={handleMockFaceVerify}
+                    onClick={handleFaceVerify}
                     disabled={verifying}
                   >
                     {verifying
                       ? "Checking face…"
-                      : "Start face verification (mock)"}
+                      : useRealFace
+                        ? "Start face verification"
+                        : "Start face verification (mock)"}
                   </button>
                 ) : (
                   <button
@@ -526,44 +626,35 @@ export default function OnboardingPage({ onComplete }) {
             </div>
           )}
 
-          {step === 5 && (
-            <div>
-              <h2 style={styles.title}>Welcome to SPYCE ✨</h2>
-              <p style={styles.subtitle}>
-                You have {subscription.trialDaysRemaining} days of free trial
-                remaining. After that, you'll need to subscribe to keep using
-                the app.
-              </p>
+          {step === 6 && (
+            <div style={{ ...styles.verticalCol, marginTop: 8 }}>
+              <button
+                type="button"
+                style={{ ...styles.actionBtn, background: "var(--pink)" }}
+                onClick={handleSubscribeNow}
+                disabled={subscription.loading}
+              >
+                {subscription.loading ? "Loading..." : "Subscribe Now"}
+              </button>
 
-              <div style={{ ...styles.verticalCol, marginTop: 32 }}>
-                <button
-                  type="button"
-                  style={{ ...styles.actionBtn, background: "var(--pink)" }}
-                  onClick={handleSubscribeNow}
-                  disabled={subscription.loading}
-                >
-                  {subscription.loading ? "Loading..." : "Subscribe Now"}
-                </button>
-
-                <button
-                  type="button"
-                  style={{
-                    ...styles.largeBtn,
-                    textAlign: "center",
-                    border: "0.5px solid var(--dark-500)",
-                    background: "transparent",
-                    color: "var(--dark-200)",
-                    marginTop: 8,
-                  }}
-                  onClick={handleStartTrial}
-                >
-                  Use first, then subscribe
-                </button>
-              </div>
+              <button
+                type="button"
+                style={{
+                  ...styles.largeBtn,
+                  textAlign: "center",
+                  border: "0.5px solid var(--dark-500)",
+                  background: "transparent",
+                  color: "var(--dark-200)",
+                  marginTop: 8,
+                }}
+                onClick={handleStartTrial}
+              >
+                Use first, then subscribe
+              </button>
             </div>
           )}
 
-          {step < 4 && (
+          {step < 5 && (
             <div style={styles.footer}>
               {step > 1 ? (
                 <button
@@ -581,7 +672,7 @@ export default function OnboardingPage({ onComplete }) {
                 style={styles.nextBtn}
                 onClick={handleNext}
               >
-                Next →
+                Continue →
               </button>
             </div>
           )}
@@ -594,112 +685,169 @@ export default function OnboardingPage({ onComplete }) {
 const styles = {
   page: {
     minHeight: "100vh",
-    background: "var(--dark-950)",
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
     position: "relative",
     overflow: "hidden",
-    padding: "20px",
+    padding: "24px 16px",
     boxSizing: "border-box",
+    background: "#080808",
   },
-  glow: {
+  bgBase: {
     position: "absolute",
-    width: 600,
-    height: 600,
-    borderRadius: "50%",
+    inset: 0,
     background:
-      "radial-gradient(circle, rgba(255,31,107,0.08) 0%, transparent 70%)",
-    top: "-10%",
-    left: "-10%",
+      "radial-gradient(ellipse 90% 70% at 50% 0%, #1f0a14 0%, #0d0d0d 50%, #080808 100%)",
+  },
+  bgMesh: {
+    position: "absolute",
+    inset: 0,
+    background:
+      "radial-gradient(circle at 15% 20%, rgba(255,31,107,0.14) 0%, transparent 42%), radial-gradient(circle at 85% 75%, rgba(168,85,247,0.12) 0%, transparent 40%), radial-gradient(circle at 50% 100%, rgba(0,212,170,0.06) 0%, transparent 35%)",
     pointerEvents: "none",
   },
-  glow2: {
+  orbA: {
     position: "absolute",
-    width: 500,
-    height: 500,
+    width: 380,
+    height: 380,
     borderRadius: "50%",
     background:
-      "radial-gradient(circle, rgba(168,85,247,0.06) 0%, transparent 70%)",
-    bottom: "-10%",
-    right: "-10%",
+      "radial-gradient(circle, rgba(255,31,107,0.18) 0%, transparent 70%)",
+    top: "-8%",
+    left: "-5%",
+    filter: "blur(4px)",
     pointerEvents: "none",
+  },
+  orbB: {
+    position: "absolute",
+    width: 320,
+    height: 320,
+    borderRadius: "50%",
+    background:
+      "radial-gradient(circle, rgba(168,85,247,0.14) 0%, transparent 70%)",
+    bottom: "-6%",
+    right: "-4%",
+    filter: "blur(6px)",
+    pointerEvents: "none",
+  },
+  gridOverlay: {
+    position: "absolute",
+    inset: 0,
+    backgroundImage:
+      "linear-gradient(rgba(255,255,255,0.025) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.025) 1px, transparent 1px)",
+    backgroundSize: "40px 40px",
+    maskImage:
+      "radial-gradient(ellipse 80% 70% at 50% 40%, black 10%, transparent 75%)",
+    WebkitMaskImage:
+      "radial-gradient(ellipse 80% 70% at 50% 40%, black 10%, transparent 75%)",
+    pointerEvents: "none",
+    opacity: 0.7,
   },
   container: {
     width: "100%",
-    maxWidth: 440,
+    maxWidth: 460,
     zIndex: 10,
   },
-  progressBar: {
-    width: "100%",
-    height: 4,
-    background: "var(--dark-800)",
-    borderRadius: 2,
-    marginBottom: 20,
-    overflow: "hidden",
+  progressRow: {
+    display: "flex",
+    gap: 6,
+    marginBottom: 18,
   },
-  progressFill: {
-    height: "100%",
-    background: "linear-gradient(90deg, var(--pink), var(--purple))",
-    transition: "width 0.3s ease",
+  progressSeg: {
+    flex: 1,
+    height: 4,
+    borderRadius: 4,
+    transition: "background 0.35s ease",
   },
   card: {
-    background: "rgba(30, 27, 38, 0.75)",
-    backdropFilter: "blur(20px)",
-    WebkitBackdropFilter: "blur(20px)",
-    border: "1px solid rgba(255, 31, 107, 0.15)",
-    borderRadius: 24,
-    padding: "36px 32px",
-    boxShadow: "0 8px 32px rgba(0, 0, 0, 0.37)",
+    background: "rgba(18, 14, 22, 0.82)",
+    backdropFilter: "blur(24px)",
+    WebkitBackdropFilter: "blur(24px)",
+    border: "1px solid rgba(255, 31, 107, 0.18)",
+    borderRadius: 28,
+    padding: "32px 28px",
+    boxShadow:
+      "0 24px 64px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(255,255,255,0.04)",
   },
   header: {
     display: "flex",
     justifyContent: "space-between",
     alignItems: "center",
-    marginBottom: 32,
+    marginBottom: 24,
   },
   logo: {
     fontFamily: "var(--font-display)",
-    fontSize: 24,
+    fontSize: 22,
     fontWeight: 800,
     color: "var(--white)",
     letterSpacing: "-0.04em",
   },
-  stepIndicator: {
-    fontSize: 12,
-    color: "var(--dark-400)",
-    fontWeight: 600,
+  stepBadge: {
+    fontSize: 11,
+    fontWeight: 700,
+    color: "var(--pink-soft)",
+    background: "rgba(255,31,107,0.12)",
+    border: "1px solid rgba(255,31,107,0.25)",
+    borderRadius: 20,
+    padding: "5px 10px",
+    letterSpacing: "0.04em",
   },
   title: {
     fontFamily: "var(--font-display)",
-    fontSize: 22,
+    fontSize: 24,
     fontWeight: 700,
     color: "var(--white)",
     marginBottom: 8,
+    letterSpacing: "-0.02em",
+    lineHeight: 1.2,
   },
   subtitle: {
     fontSize: 13,
-    color: "var(--dark-300)",
-    marginBottom: 28,
-    lineHeight: 1.5,
+    color: "var(--dark-200)",
+    marginBottom: 26,
+    lineHeight: 1.55,
   },
   field: { marginBottom: 20 },
   label: {
     display: "block",
-    fontSize: 12,
-    fontWeight: 600,
+    fontSize: 11,
+    fontWeight: 700,
     color: "var(--dark-200)",
     marginBottom: 8,
     textTransform: "uppercase",
-    letterSpacing: "0.04em",
+    letterSpacing: "0.06em",
+  },
+  inputShell: {
+    display: "flex",
+    alignItems: "center",
+    background: "rgba(0,0,0,0.35)",
+    border: "1px solid var(--dark-500)",
+    borderRadius: 14,
+    overflow: "hidden",
+  },
+  prefix: {
+    padding: "0 0 0 14px",
+    color: "var(--dark-300)",
+    fontWeight: 600,
+    fontSize: 15,
+  },
+  inputBare: {
+    flex: 1,
+    border: "none",
+    background: "transparent",
+    padding: "13px 14px 13px 6px",
+    color: "var(--white)",
+    fontSize: 15,
+    outline: "none",
   },
   input: {
     width: "100%",
     boxSizing: "border-box",
-    background: "var(--dark-800)",
-    border: "1px solid var(--dark-600)",
-    borderRadius: 12,
-    padding: "12px 14px",
+    background: "rgba(0,0,0,0.35)",
+    border: "1px solid var(--dark-500)",
+    borderRadius: 14,
+    padding: "13px 14px",
     color: "var(--white)",
     fontSize: 15,
     outline: "none",
@@ -715,19 +863,19 @@ const styles = {
     gap: 8,
   },
   chip: {
-    borderRadius: 20,
-    padding: "8px 14px",
+    borderRadius: 22,
+    padding: "9px 15px",
     fontSize: 13,
     fontWeight: 600,
     cursor: "pointer",
     border: "1px solid var(--dark-500)",
-    background: "transparent",
+    background: "rgba(255,255,255,0.03)",
     color: "var(--white)",
   },
   chipActive: {
     background: "rgba(255, 31, 107, 0.18)",
     borderColor: "var(--pink)",
-    color: "var(--pink)",
+    color: "var(--pink-soft)",
   },
   chipInactive: {},
   verticalCol: {
@@ -754,40 +902,44 @@ const styles = {
     width: "100%",
   },
   verifyBox: {
-    background: "var(--dark-800)",
-    borderRadius: 16,
-    padding: 24,
+    background: "rgba(0,0,0,0.3)",
+    borderRadius: 18,
+    padding: 28,
     textAlign: "center",
     border: "1px solid var(--dark-600)",
   },
-  verifyIcon: { fontSize: 40, marginBottom: 12 },
+  verifyIcon: { fontSize: 44, marginBottom: 12 },
   verifyTitle: {
     color: "var(--white)",
-    fontSize: 16,
+    fontSize: 17,
     fontWeight: 700,
     marginBottom: 8,
+    fontFamily: "var(--font-display)",
   },
   verifyText: {
-    color: "var(--dark-300)",
+    color: "var(--dark-200)",
     fontSize: 13,
-    lineHeight: 1.5,
+    lineHeight: 1.55,
   },
   footer: {
     display: "flex",
     justifyContent: "space-between",
     alignItems: "center",
     marginTop: 28,
+    gap: 12,
   },
   backBtn: {
     background: "transparent",
-    border: "none",
-    color: "var(--dark-300)",
+    border: "1px solid var(--dark-500)",
+    borderRadius: 12,
+    color: "var(--dark-100)",
     fontWeight: 600,
     cursor: "pointer",
     fontSize: 14,
+    padding: "11px 16px",
   },
   nextBtn: {
-    background: "var(--pink)",
+    background: "linear-gradient(135deg, var(--pink), #e11d68)",
     border: "none",
     borderRadius: 12,
     color: "var(--white)",
@@ -795,6 +947,8 @@ const styles = {
     padding: "12px 22px",
     cursor: "pointer",
     fontSize: 14,
+    boxShadow: "0 8px 24px rgba(255,31,107,0.3)",
+    marginLeft: "auto",
   },
   errorBox: {
     background: "rgba(255, 107, 129, 0.12)",

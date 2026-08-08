@@ -43,6 +43,8 @@ const INITIAL_DISCONNECT_GRACE_MS = 20000;
 const INITIAL_ICE_TIMEOUT_MS = 60000;
 const ICE_RESTART_COOLDOWN = 8000;
 const MAX_RECOVERY_CYCLES = 2;
+// Auto hang-up if callee never picks up (matches backend RING_TIMEOUT_SECONDS)
+const RING_TIMEOUT_MS = 90 * 1000; // 1.5 minutes
 const ALLOWED_OFFER_REASONS = P2P_ONLY_MODE
   ? new Set(["initial"])
   : new Set(["initial", "ice_restart_recovery"]);
@@ -154,6 +156,7 @@ export default function CallManager({ user, debug }) {
   // Phase 6 — TURN escalation state
   const initialIceTimeoutRef = useRef(null); // 60s: first-connect patience window
   const failureDiagnosisTimeoutRef = useRef(null); // Phase 9 failure engine
+  const ringTimeoutRef = useRef(null); // 1.5 min: no-answer ring timeout
   const turnEscalatedRef = useRef(false);
   const turnFallbackOccurredRef = useRef(false);
 
@@ -1283,6 +1286,34 @@ export default function CallManager({ user, debug }) {
     if (initialIceTimeoutRef.current) { clearTimeout(initialIceTimeoutRef.current); initialIceTimeoutRef.current = null; }
     if (disconnectTimerRef.current) { clearTimeout(disconnectTimerRef.current); disconnectTimerRef.current = null; }
     if (failureDiagnosisTimeoutRef.current) { clearTimeout(failureDiagnosisTimeoutRef.current); failureDiagnosisTimeoutRef.current = null; }
+    if (ringTimeoutRef.current) { clearTimeout(ringTimeoutRef.current); ringTimeoutRef.current = null; }
+  };
+
+  const clearRingTimeout = () => {
+    if (ringTimeoutRef.current) {
+      clearTimeout(ringTimeoutRef.current);
+      ringTimeoutRef.current = null;
+    }
+  };
+
+  /** End unanswered ring after 1.5 minutes (client-side backup to server task). */
+  const startRingTimeout = (timeoutMs = RING_TIMEOUT_MS) => {
+    clearRingTimeout();
+    ringTimeoutRef.current = setTimeout(() => {
+      ringTimeoutRef.current = null;
+      const phase = callStateRef.current;
+      if (phase !== "ringing" && phase !== "incoming") return;
+      log.warn("Ring timeout (1.5 min) — no answer");
+      sendSignaling({ action: "end", reason: "no_answer" });
+      cleanupCall();
+      setTimeout(() => {
+        alert(
+          phase === "incoming"
+            ? "Missed call — ring timed out."
+            : "No answer — call ended after 1.5 minutes."
+        );
+      }, 80);
+    }, timeoutMs);
   };
 
   // ───────────────────────────────────────────────────────────────────────────
@@ -2429,6 +2460,23 @@ export default function CallManager({ user, debug }) {
         setCallType(callTypeLower);
         setCallerEmail(msg.caller_email || "Someone");
         setCallState("incoming");
+        startRingTimeout(
+          (msg.ring_timeout_seconds ? Number(msg.ring_timeout_seconds) * 1000 : null) ||
+            RING_TIMEOUT_MS
+        );
+        break;
+      case "call.ringing":
+        if (msg.call_id) {
+          setCallId(msg.call_id);
+          callIdRef.current = msg.call_id;
+        }
+        if (callStateRef.current === "ringing" || callStateRef.current === "idle") {
+          setCallState("ringing");
+          startRingTimeout(
+            (msg.ring_timeout_seconds ? Number(msg.ring_timeout_seconds) * 1000 : null) ||
+              RING_TIMEOUT_MS
+          );
+        }
         break;
       case "call.accepted":
         if (msg.call_id) {
@@ -2436,6 +2484,7 @@ export default function CallManager({ user, debug }) {
           callIdRef.current = msg.call_id;
           if (!callTimelineRef.current.callId) resetCallTimeline(msg.call_id);
         }
+        clearRingTimeout();
         setIsAccepting(false);
         setCallState("active");
         setIsMediaConnected(false);
@@ -2481,8 +2530,16 @@ export default function CallManager({ user, debug }) {
         break;
       case "call.ended":
         setIsAccepting(false);
+        clearRingTimeout();
         cleanupCall();
-        setTimeout(() => alert(`Call ended. Reason: ${msg.reason || "disconnect"}. Duration: ${msg.duration || 0}s`), 100);
+        {
+          const reason = msg.reason || "disconnect";
+          const friendly =
+            reason === "no_answer"
+              ? "No answer — call ended after 1.5 minutes."
+              : `Call ended. Reason: ${reason}. Duration: ${msg.duration || 0}s`;
+          setTimeout(() => alert(friendly), 100);
+        }
         break;
       case "error":
         setIsAccepting(false);
@@ -3058,6 +3115,7 @@ export default function CallManager({ user, debug }) {
       setCallState("ringing");
       setChatSaved(false);
       setCameraUnlocked(false);
+      startRingTimeout(RING_TIMEOUT_MS);
       sendSignaling({ action: "initiate", callee_id: targetId, call_type: type });
     } catch (err) {
       alert("⚠️ Camera/microphone access required. Check browser settings.");
@@ -3105,6 +3163,7 @@ export default function CallManager({ user, debug }) {
       const stream = await acquireLocalMedia(needsVideo);
       localStreamRef.current = stream;
       isInitiatorRef.current = false;
+      clearRingTimeout();
       setIsAccepting(true);
       sendSignaling({ action: "accept", call_id: callId });
     } catch (err) {

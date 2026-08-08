@@ -3,6 +3,7 @@ import { profileAPI, verificationAPI, geoAPI, optionsAPI, imageAPI } from "../ap
 import useSubscription from "../hooks/useSubscription";
 import profileStyles from "../styles/ProfilePage.module.css";
 import ThemeSettings from "../components/ThemeSettings";
+import LanguagePicker from "../components/LanguagePicker";
 
 export default function ProfilePage() {
   const [username, setUsername] = useState("");
@@ -551,30 +552,17 @@ export default function ProfilePage() {
             </select>
           </div>
 
-          {/* Languages */}
+          {/* Languages — featured 5 + search for full catalog */}
           <div style={styles.card}>
             <div style={styles.cardLabel}>
               Languages{" "}
               <span style={styles.vibeCount}>{languages.length} selected</span>
             </div>
-            <div style={styles.vibesGrid}>
-              {languageOpts.map((l) => (
-                <span
-                  key={l.id}
-                  style={{
-                    ...styles.vibe,
-                    ...(languages.includes(l.name) ? styles.vibeOn : styles.vibeOff),
-                  }}
-                  onClick={() => {
-                    setLanguages(prev =>
-                      prev.includes(l.name) ? prev.filter(x => x !== l.name) : [...prev, l.name]
-                    );
-                  }}
-                >
-                  {l.name}
-                </span>
-              ))}
-            </div>
+            <LanguagePicker
+              options={languageOpts}
+              value={languages}
+              onChange={setLanguages}
+            />
           </div>
 
           {/* Turn Ons */}

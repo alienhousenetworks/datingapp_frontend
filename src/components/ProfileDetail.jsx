@@ -359,6 +359,7 @@ export default function ProfileDetail({ profile, onClose, onLike, onPass }) {
               <option value="SPAM">Spam</option>
               <option value="HARASSMENT">Harassment</option>
               <option value="FAKE_PROFILE">Fake Profile</option>
+              <option value="UNDERAGE_CSE">Underage sexual exploitation</option>
               <option value="OTHER">Other (specify below)</option>
             </select>
             <label style={styles.customLabel}>Description</label>

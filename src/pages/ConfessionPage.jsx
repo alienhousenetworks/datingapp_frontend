@@ -274,12 +274,25 @@ export default function ConfessionPage() {
     setSubmittingReport(true);
     try {
       // Dedicated confession report endpoint resolves author server-side
-      await socialAPI.report(
+      const res = await socialAPI.report(
         reportModalId,
         reportReason,
         reportDescription.trim()
       );
-      showToast("Report submitted successfully");
+      const hideId = String(reportModalId);
+      setConfessions((prev) =>
+        prev.filter((c) => {
+          const id = String(c.id || "");
+          const parent = String(c.parent_id || "");
+          return id !== hideId && parent !== hideId;
+        })
+      );
+      const toastText = res?.pending_admin_review
+        ? "Hidden and sent to safety review. Staff will verify."
+        : res?.globally_hidden
+          ? "This confession was removed for everyone after multiple reports."
+          : "Hidden for you. Others can still see it.";
+      showToast(toastText);
       setReportModalId(null);
       setReportDescription("");
     } catch (err) {
@@ -306,8 +319,8 @@ export default function ConfessionPage() {
   };
 
   const handlePost = async () => {
-    if (!text.trim() || text.length < 30) {
-      showToast("Write at least 30 characters");
+    if (text.trim().length < 10) {
+      showToast("Write at least 10 characters");
       return;
     }
     setPosting(true);
@@ -351,24 +364,38 @@ export default function ConfessionPage() {
 
   return (
     <div style={s.page} className={confessionStyles.page}>
-      {/* Header */}
       <div style={s.header} className={confessionStyles.header}>
         <div>
           <h1 style={s.title}>Confession Wall</h1>
-          <p style={s.sub}>
-            Anonymous · {profileLocationName ? `City-wide (${profileLocationName})` : "Location not detected (Global feed)"} · 24h auto-delete
+          <p style={s.subtitle}>
+            Nearby anonymous thoughts • Real vibes • Disappears in 24h
           </p>
         </div>
         <div style={s.headerRight} className={confessionStyles.headerRight}>
           <div style={s.filters} className={confessionStyles.filters}>
-            {['My City', '10km', '50km', '100km'].map((f) => (
-              <button key={f} style={s.filterBtn}>
-                {f}
+            {MOODS.map((m) => (
+              <button
+                key={m}
+                style={{
+                  ...s.filterChip,
+                  background:
+                    activeFilter === m ? "var(--pink-500)" : "var(--dark-800)",
+                  border:
+                    activeFilter === m
+                      ? "1px solid var(--pink-500)"
+                      : "0.5px solid var(--dark-600)",
+                  color: activeFilter === m ? "#fff" : "var(--dark-200)",
+                  fontWeight: activeFilter === m ? 600 : 400,
+                }}
+                onClick={() => setActiveFilter(m)}
+              >
+                {m === "ALL" ? "✨ All" : m.toLowerCase()}
               </button>
             ))}
           </div>
           <button style={s.composeBtn} className={confessionStyles.composeBtn} onClick={() => setComposing(true)}>
-            ✍ Confess
+            <span style={{ fontSize: "16px", lineHeight: 1 }}>+</span>
+            <span>Spill Tea</span>
           </button>
         </div>
       </div>
@@ -394,16 +421,16 @@ export default function ConfessionPage() {
               autoComplete="off"
               style={s.textarea}
               className={confessionStyles.textarea}
-              placeholder="No names, no photos — just vibes. Min 30, Max 280 chars."
+              placeholder="No names, no photos — just vibes. Min 10, Max 2000 chars."
               value={text}
-              onChange={(e) => setText(e.target.value.slice(0, 280))}
+              onChange={(e) => setText(e.target.value.slice(0, 2000))}
               autoFocus
             />
             <div style={{
               ...s.charCount,
-              color: text.length < 30 ? "#EF4444" : "var(--dark-400)",
+              color: text.length < 10 ? "#EF4444" : "var(--dark-400)",
             }}>
-              {text.length < 30 ? `Min 30 chars required (${text.length}/280)` : `${text.length}/280`}
+              {text.length < 10 ? `Min 10 chars required (${text.length}/2000)` : `${text.length}/2000`}
             </div>
 
             <div style={s.moodRow}>
@@ -440,10 +467,10 @@ export default function ConfessionPage() {
             <button
               style={{
                 ...s.postBtn,
-                opacity: posting || text.length < 30 ? 0.6 : 1,
+                opacity: posting || text.length < 10 ? 0.6 : 1,
               }}
               onClick={handlePost}
-              disabled={posting || text.length < 30}
+              disabled={posting || text.length < 10}
             >
               {posting ? "Posting..." : "Post anonymously →"}
             </button>
@@ -686,6 +713,7 @@ export default function ConfessionPage() {
               <option value="SPAM">Spam</option>
               <option value="HARASSMENT">Harassment</option>
               <option value="FAKE_PROFILE">Fake / misleading</option>
+              <option value="UNDERAGE_CSE">Underage sexual exploitation</option>
               <option value="OTHER">Other (specify below)</option>
             </select>
             <label style={{...s.moodLabel, display: 'block', marginBottom: 6}}>Description</label>

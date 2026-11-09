@@ -47,7 +47,7 @@ const MAX_RECOVERY_CYCLES = 2;
 const RING_TIMEOUT_MS = 90 * 1000; // 1.5 minutes
 const ALLOWED_OFFER_REASONS = P2P_ONLY_MODE
   ? new Set(["initial"])
-  : new Set(["initial", "ice_restart_recovery"]);
+  : new Set(["initial", "ice_restart_recovery", "coordinated_restart"]);
 
 const DEFAULT_STUN_SERVERS = [
   { urls: "stun:stun.l.google.com:19302" },
@@ -2505,12 +2505,17 @@ export default function CallManager({ user, debug }) {
         break;
       case "ice_restart_approved":
         coordinatedRestartApprovedRef.current = true;
-        if (isInitiatorRef.current) {
+        if (!turnEscalatedRef.current) {
+          escalateToTurn().catch(() => {});
+        } else if (isInitiatorRef.current) {
           sendIceRestartOffer("coordinated_restart").catch(() => { });
         }
         break;
       case "ice_restart_pending":
         logWebRTC("ICE_RESTART_PENDING", { votes: msg.restart_votes });
+        if (!isInitiatorRef.current) {
+          sendSignaling({ action: "ice_restart_request", call_id: callIdRef.current });
+        }
         break;
       case "offer":
       case "answer":
@@ -3153,6 +3158,10 @@ export default function CallManager({ user, debug }) {
     if (socketRef.current?.readyState !== WebSocket.OPEN) {
       alert("⚠️ Connection lost. Cannot accept call.");
       return;
+    }
+    // Prime the audio element synchronously on user gesture for browser Autoplay compliance
+    if (remoteAudioRef.current) {
+      remoteAudioRef.current.play().catch(() => {});
     }
     const needsVideo =
       callTypeRef.current === "video" ||
